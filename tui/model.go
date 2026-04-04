@@ -67,6 +67,7 @@ type Model struct {
 	trackInfo sonos.TrackInfo
 	transport string // PLAYING | PAUSED_PLAYBACK | STOPPED | TRANSITIONING
 	volume    int    // 0–100
+	muted     bool
 	isLineIn  bool
 
 	// Position (local counter)
@@ -308,13 +309,16 @@ func (m *Model) handleAVTransportEvent(body []byte) []tea.Cmd {
 }
 
 func (m *Model) handleRenderingControlEvent(body []byte) {
-	vol, err := sonos.ParseRenderingControlEvent(body)
+	state, err := sonos.ParseRenderingControlEvent(body)
 	if err != nil {
 		log.Printf("parse RenderingControl event: %v", err)
 		return
 	}
-	if vol >= 0 {
-		m.volume = vol
+	if state.Volume >= 0 {
+		m.volume = state.Volume
+	}
+	if state.HasMute {
+		m.muted = state.Muted
 	}
 }
 
@@ -337,9 +341,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.doQuit()
 
 	case key.Matches(msg, keys.PlayPause):
+		if m.isLineIn {
+			// In line-in mode, space toggles mute.
+			return m, cmdToggleMute(sp.IP, m.muted)
+		}
 		return m, cmdTogglePlayPause(sp.IP, m.transport)
 
 	case key.Matches(msg, keys.Stop):
+		if m.isLineIn {
+			m.setStatus("Stop not available in Line-In mode")
+			return m, nil
+		}
 		return m, cmdStop(sp.IP)
 
 	case key.Matches(msg, keys.VolUp):
@@ -362,9 +374,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmdSwitchToLineIn(sp.IP, sp.UUID)
 
 	case key.Matches(msg, keys.Prev):
+		if m.isLineIn {
+			m.setStatus("Not available in Line-In mode")
+			return m, nil
+		}
 		return m, cmdPrev(sp.IP)
 
 	case key.Matches(msg, keys.Next):
+		if m.isLineIn {
+			m.setStatus("Not available in Line-In mode")
+			return m, nil
+		}
 		return m, cmdNext(sp.IP)
 
 	case key.Matches(msg, keys.Tab):
@@ -680,6 +700,15 @@ func cmdFetchArt(url string, proto Protocol) tea.Cmd {
 	return func() tea.Msg {
 		rendered := FetchAndRenderArt(url, proto)
 		return artFetchedMsg{url: url, data: rendered}
+	}
+}
+
+func cmdToggleMute(ip string, currentlyMuted bool) tea.Cmd {
+	return func() tea.Msg {
+		if err := sonos.SetMute(ip, !currentlyMuted); err != nil {
+			return errMsg{err}
+		}
+		return nil
 	}
 }
 

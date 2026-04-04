@@ -267,17 +267,24 @@ func ParseAVTransportEvent(speakerIP string, body []byte) (AVTransportState, err
 	return state, nil
 }
 
-// ParseRenderingControlEvent extracts the master volume from a RenderingControl GENA event.
-// Returns -1 if not found.
-func ParseRenderingControlEvent(body []byte) (int, error) {
+// RenderingState holds parsed RenderingControl GENA event data.
+type RenderingState struct {
+	Volume int  // -1 if not present in event
+	Muted  bool // false if not present in event
+	HasMute bool // true if Muted field was found in event
+}
+
+// ParseRenderingControlEvent extracts volume and mute from a RenderingControl GENA event.
+func ParseRenderingControlEvent(body []byte) (RenderingState, error) {
 	lastChange, err := extractLastChange(body)
 	if err != nil {
-		return -1, fmt.Errorf("extract LastChange: %w", err)
+		return RenderingState{Volume: -1}, fmt.Errorf("extract LastChange: %w", err)
 	}
 
 	inner := html.UnescapeString(strings.TrimSpace(lastChange))
 	dec := xml.NewDecoder(strings.NewReader(inner))
 	var inInstance bool
+	state := RenderingState{Volume: -1}
 
 	for {
 		tok, err := dec.Token()
@@ -293,14 +300,19 @@ func ParseRenderingControlEvent(body []byte) (int, error) {
 			if !inInstance {
 				continue
 			}
-			if t.Name.Local == "Volume" {
-				channel := attrVal(t, "channel")
-				if strings.EqualFold(channel, "Master") {
-					val := attrVal(t, "val")
-					v := 0
-					fmt.Sscan(val, &v)
-					return v, nil
-				}
+			channel := attrVal(t, "channel")
+			if !strings.EqualFold(channel, "Master") && channel != "" {
+				continue
+			}
+			switch t.Name.Local {
+			case "Volume":
+				val := attrVal(t, "val")
+				v := 0
+				fmt.Sscan(val, &v)
+				state.Volume = v
+			case "Mute":
+				state.Muted = attrVal(t, "val") == "1"
+				state.HasMute = true
 			}
 		case xml.EndElement:
 			if t.Name.Local == "InstanceID" {
@@ -308,7 +320,7 @@ func ParseRenderingControlEvent(body []byte) (int, error) {
 			}
 		}
 	}
-	return -1, nil
+	return state, nil
 }
 
 // extractLastChange pulls the text content of the <LastChange> element from
