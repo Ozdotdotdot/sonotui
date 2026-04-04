@@ -5,6 +5,7 @@ import "github.com/charmbracelet/bubbles/key"
 type keyMap struct {
 	PlayPause key.Binding
 	Stop      key.Binding
+	Mute      key.Binding
 	VolUp     key.Binding
 	VolDown   key.Binding
 	VolUp1    key.Binding
@@ -25,6 +26,10 @@ var keys = keyMap{
 	Stop: key.NewBinding(
 		key.WithKeys("s"),
 		key.WithHelp("[s]", "stop"),
+	),
+	Mute: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("[m]", "mute/unmute"),
 	),
 	VolUp: key.NewBinding(
 		key.WithKeys("k", "up"),

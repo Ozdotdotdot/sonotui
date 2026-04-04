@@ -20,7 +20,8 @@ const (
 
 type deviceDescription struct {
 	Device struct {
-		FriendlyName string `xml:"friendlyName"`
+		RoomName     string `xml:"roomName"`     // user-set room name, e.g. "Living Room"
+		FriendlyName string `xml:"friendlyName"` // fallback: "IP - Model - UUID"
 		UDN          string `xml:"UDN"`
 	} `xml:"device"`
 }
@@ -92,7 +93,11 @@ func fetchSpeakerInfo(ctx context.Context, client *http.Client, ip string) (Spea
 	}
 
 	udn := strings.TrimPrefix(strings.TrimSpace(dd.Device.UDN), "uuid:")
-	name := strings.TrimSpace(dd.Device.FriendlyName)
+	// Prefer roomName (user-set, e.g. "Living Room") over friendlyName ("IP - Model - UUID").
+	name := strings.TrimSpace(dd.Device.RoomName)
+	if name == "" {
+		name = strings.TrimSpace(dd.Device.FriendlyName)
+	}
 	if name == "" {
 		name = ip
 	}

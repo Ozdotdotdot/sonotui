@@ -341,10 +341,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.doQuit()
 
 	case key.Matches(msg, keys.PlayPause):
-		if m.isLineIn {
-			// In line-in mode, space toggles mute.
-			return m, cmdToggleMute(sp.IP, m.muted)
-		}
 		return m, cmdTogglePlayPause(sp.IP, m.transport)
 
 	case key.Matches(msg, keys.Stop):
@@ -353,6 +349,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, cmdStop(sp.IP)
+
+	case key.Matches(msg, keys.Mute):
+		return m, cmdToggleMute(sp.IP, m.muted)
 
 	case key.Matches(msg, keys.VolUp):
 		return m, cmdSetVolume(sp.IP, m.volume+5)
@@ -475,141 +474,279 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return ""
 	}
+	innerW := m.width - 2 // space inside the │ │ frame chars
 
-	wide := m.width >= 80
+	var b strings.Builder
+
+	// Outer top border.
+	b.WriteString("╭" + strings.Repeat("─", innerW) + "╮\n")
 
 	// Header line.
-	header := m.renderHeader()
+	b.WriteString(m.frameLine(m.headerContent(innerW), innerW))
+	b.WriteString("\n")
 
-	// Main content.
-	var content string
-	if wide {
-		content = m.renderWide()
+	// Separator.
+	b.WriteString("╞" + strings.Repeat("═", innerW) + "╡\n")
+
+	// Content area — 1 space padding each side.
+	contentW := innerW - 2
+	var contentLines []string
+	if m.width >= 80 {
+		contentLines = m.wideContent(contentW)
 	} else {
-		content = m.renderNarrow()
+		contentLines = m.narrowContent(contentW)
+	}
+	b.WriteString(m.frameLine("", innerW) + "\n") // top breathing room
+	for _, cl := range contentLines {
+		b.WriteString(m.frameLine(" "+cl, innerW) + "\n")
+	}
+	b.WriteString(m.frameLine("", innerW) + "\n") // bottom breathing room
+
+	// Separator.
+	b.WriteString("╞" + strings.Repeat("═", innerW) + "╡\n")
+
+	// Help lines.
+	for _, hl := range m.helpLines(innerW) {
+		b.WriteString(m.frameLine(hl, innerW) + "\n")
 	}
 
-	// Help + status.
-	help := m.renderHelp()
+	// Outer bottom border.
+	b.WriteString("╰" + strings.Repeat("─", innerW) + "╯")
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
+	return b.String()
 }
 
-func (m Model) renderHeader() string {
-	left := " sonotui"
+// frameLine wraps content in │...│ padding to exactly innerW chars.
+func (m Model) frameLine(content string, innerW int) string {
+	visW := lipgloss.Width(content)
+	pad := innerW - visW
+	if pad < 0 {
+		pad = 0
+	}
+	return "│" + content + strings.Repeat(" ", pad) + "│"
+}
 
-	roomName := ""
+// headerContent builds the header row content string (exactly innerW visual chars).
+func (m Model) headerContent(innerW int) string {
+	brand := headerBrandStyle.Render(" sonotui")
+	sep := headerRoomStyle.Render(" › ")
+
+	room := ""
 	if len(m.speakers) > 0 {
-		roomName = m.speakers[m.activeSpeaker].FriendlyName
+		room = m.speakers[m.activeSpeaker].FriendlyName
 	} else if m.discovering {
-		roomName = "discovering…"
+		room = "discovering…"
 	}
+	roomStr := headerRoomStyle.Render(room)
 
-	stateLabel := transportStyle(m.transport).Render(transportLabel(m.transport))
-	vol := volStyle.Render(fmt.Sprintf("vol:%d", m.volume))
+	left := brand + sep + roomStr
 
-	right := fmt.Sprintf("%s   %s   %s ", roomName, stateLabel, vol)
-
-	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
+	muteStr := ""
+	if m.muted {
+		muteStr = " 🔇"
 	}
+	state := transportStateStyle(m.transport)
+	vol := volLabelStyle.Render(fmt.Sprintf("vol:%d", m.volume))
+	right := state + muteStr + "   " + vol + " "
 
-	return headerStyle.
-		Width(m.width).
-		Render(left + strings.Repeat(" ", pad) + right)
+	gap := innerW - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m Model) renderWide() string {
-	artWidth := 16
-	metaWidth := m.width - artWidth - 1
+// wideContent returns the lines of the content area for wide terminals.
+func (m Model) wideContent(availW int) []string {
+	const artCardW = 22
+	const rowGap = 2
+	trackCardW := availW - artCardW - rowGap
+	if trackCardW < 20 {
+		trackCardW = 20
+	}
+	const cardH = 9 // total card height including border
 
-	artPane := m.renderArtPane(artWidth)
-	metaPane := m.renderMetaPane(metaWidth)
+	artCard := m.renderArtCard(artCardW, cardH)
+	trackCard := m.renderTrackCard(trackCardW, cardH)
+	row1 := lipgloss.JoinHorizontal(lipgloss.Top, artCard, strings.Repeat(" ", rowGap), trackCard)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, artPane, metaPane)
+	// Bottom row: vol + status cards.
+	volCardW := availW * 2 / 5
+	statusCardW := availW - volCardW - rowGap
+	const bottomH = 4
+	volCard := m.renderVolCard(volCardW, bottomH)
+	statusCard := m.renderStatusCard(statusCardW, bottomH)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Top, volCard, strings.Repeat(" ", rowGap), statusCard)
+
+	var lines []string
+	lines = append(lines, strings.Split(row1, "\n")...)
+	lines = append(lines, "") // gap between rows
+	lines = append(lines, strings.Split(row2, "\n")...)
+	return lines
 }
 
-func (m Model) renderNarrow() string {
-	return m.renderMetaPane(m.width)
+// narrowContent returns lines for narrow terminals (<80 cols) — single column.
+func (m Model) narrowContent(availW int) []string {
+	const artH = 7
+	artCard := m.renderArtCard(availW, artH)
+
+	const trackH = 9
+	trackCard := m.renderTrackCard(availW, trackH)
+
+	const volH = 4
+	volCard := m.renderVolCard(availW/2-1, volH)
+	statusCard := m.renderStatusCard(availW-availW/2-1, volH)
+	bottomRow := lipgloss.JoinHorizontal(lipgloss.Top, volCard, " ", statusCard)
+
+	var lines []string
+	lines = append(lines, strings.Split(artCard, "\n")...)
+	lines = append(lines, "")
+	lines = append(lines, strings.Split(trackCard, "\n")...)
+	lines = append(lines, "")
+	lines = append(lines, strings.Split(bottomRow, "\n")...)
+	return lines
 }
 
-func (m Model) renderArtPane(w int) string {
+// renderArtCard renders the album art card.
+func (m Model) renderArtCard(totalW, totalH int) string {
 	art := m.artRendered
 	if art == "" {
 		art = artPlaceholder
 	}
-	return lipgloss.NewStyle().
-		Width(w).
-		Height(6).
-		Padding(1, 1).
+	return cardStyle(artCardBorderColor, totalW, totalH).
+		Align(lipgloss.Center, lipgloss.Center).
 		Render(art)
 }
 
-func (m Model) renderMetaPane(w int) string {
-	var lines []string
-
-	if m.isLineIn {
-		lines = []string{
-			titleStyle.Render("Line-In"),
-			artistStyle.Render("analog source"),
-			"",
-			liveStyle.Render("── live ──"),
-		}
-	} else {
-		lines = []string{
-			titleStyle.Render(truncate(m.trackInfo.Title, w-4)),
-			artistStyle.Render(truncate(m.trackInfo.Artist, w-4)),
-			albumStyle.Render(truncate(m.trackInfo.Album, w-4)),
-			"",
-			m.renderProgress(w - 4),
-		}
+// renderTrackCard renders the track info + progress card.
+func (m Model) renderTrackCard(totalW, totalH int) string {
+	contentW := totalW - 4 // border + padding
+	if contentW < 4 {
+		contentW = 4
 	}
 
-	return lipgloss.NewStyle().
-		Width(w).
-		Padding(1, 2).
+	var lines []string
+	if m.isLineIn {
+		lines = []string{
+			trackTitleStyle.Render("Line-In"),
+			trackArtistStyle.Render("analog source"),
+			"",
+			liveStyle.Render("── LIVE ──"),
+		}
+	} else {
+		title := trackTitleStyle.Render(truncate(m.trackInfo.Title, contentW))
+		artist := trackArtistStyle.Render(truncate(m.trackInfo.Artist, contentW))
+		album := trackAlbumStyle.Render(truncate(m.trackInfo.Album, contentW))
+		progress := m.renderProgressBar(contentW)
+		lines = []string{title, artist, album, "", progress}
+	}
+
+	return cardStyle(trackCardBorderColor, totalW, totalH).
 		Render(strings.Join(lines, "\n"))
 }
 
-func (m Model) renderProgress(availWidth int) string {
-	if m.pos.duration <= 0 || m.isLineIn {
+// renderVolCard renders the volume card.
+func (m Model) renderVolCard(totalW, totalH int) string {
+	contentW := totalW - 4
+	if contentW < 4 {
+		contentW = 4
+	}
+	bar := m.renderVolBar(contentW)
+	return cardStyle(volCardBorderColor, totalW, totalH).
+		Align(lipgloss.Left, lipgloss.Center).
+		Render(bar)
+}
+
+// renderStatusCard renders the transport state + room name card.
+func (m Model) renderStatusCard(totalW, totalH int) string {
+	state := transportStateStyle(m.transport)
+	muteStr := ""
+	if m.muted && m.isLineIn {
+		muteStr = " 🔇 muted"
+	}
+	room := ""
+	if len(m.speakers) > 0 {
+		room = "  " + statusRoomStyle.Render(m.speakers[m.activeSpeaker].FriendlyName)
+	}
+	content := state + muteStr + room
+	return cardStyle(transportCardBorderColor(m.transport), totalW, totalH).
+		Align(lipgloss.Left, lipgloss.Center).
+		Render(content)
+}
+
+// renderProgressBar renders the progress bar to fit availW chars.
+func (m Model) renderProgressBar(availW int) string {
+	if m.pos.duration <= 0 {
 		return ""
 	}
-
-	timeStr := fmt.Sprintf("  %s / %s", formatDuration(m.pos.elapsed), formatDuration(m.pos.duration))
-	barWidth := availWidth - lipgloss.Width(timeStr) - 2
-	if barWidth < 4 {
-		barWidth = 4
+	timeStr := progTimeStyle.Render(fmt.Sprintf(" %s / %s", formatDuration(m.pos.elapsed), formatDuration(m.pos.duration)))
+	timeW := lipgloss.Width(timeStr)
+	barW := availW - timeW - 1
+	if barW < 4 {
+		barW = 4
 	}
 
 	filled := 0
 	if m.pos.duration > 0 {
-		filled = barWidth * m.pos.elapsed / m.pos.duration
-		if filled > barWidth {
-			filled = barWidth
+		filled = barW * m.pos.elapsed / m.pos.duration
+		if filled > barW {
+			filled = barW
 		}
 	}
-	empty := barWidth - filled
+	empty := barW - filled
 
-	bar := progressFill.Render(strings.Repeat("█", filled)) +
-		progressEmpty.Render(strings.Repeat("░", empty))
-
+	bar := progFillStyle.Render(strings.Repeat("█", filled)) +
+		progEmptyStyle.Render(strings.Repeat("░", empty))
 	return bar + timeStr
 }
 
-func (m Model) renderHelp() string {
-	lines := []string{
-		helpStyle.Render("[spc] play/pause  [s] stop  [l] line-in  [tab] room"),
-		helpStyle.Render("[j/k] vol  [</>] prev/next  [r] discover  [q] quit"),
+// renderVolBar renders a volume bar like: Vol ▐███████░░░░░▌ 65%
+func (m Model) renderVolBar(availW int) string {
+	label := volLabelStyle.Render("Vol")
+	pct := volPctStyle.Render(fmt.Sprintf(" %3d%%", m.volume))
+	// Bar takes the remaining space: availW - "Vol" - " " - barChars - pct
+	barW := availW - lipgloss.Width(label) - 1 - lipgloss.Width(pct) - 2 // -2 for ▐▌
+	if barW < 4 {
+		barW = 4
 	}
+	filled := barW * m.volume / 100
+	if filled > barW {
+		filled = barW
+	}
+	empty := barW - filled
+	bar := "▐" + volBarFillStyle.Render(strings.Repeat("█", filled)) +
+		volBarEmptyStyle.Render(strings.Repeat("░", empty)) + "▌"
+	return label + " " + bar + pct
+}
+
+// helpLines returns the help bar content lines (no frame chars).
+func (m Model) helpLines(innerW int) []string {
+	hk := helpKeyStyle
+	hd := helpDescStyle
+	hs := helpSepStyle.Render("  ")
+
+	var line1, line2 string
+	if m.isLineIn {
+		muteLabel := "[m] mute"
+		if m.muted {
+			muteLabel = "[m] unmute"
+		}
+		line1 = " " + hk.Render("[spc] play/pause") + hs + hd.Render(muteLabel) + hs + hd.Render("[l] line-in") + hs + hd.Render("[tab] room") + hs + hd.Render("[q] quit")
+		line2 = " " + hk.Render("[j/k] vol±5") + hs + hd.Render("[J/K] vol±1") + hs + hd.Render("[r] discover")
+	} else {
+		line1 = " " + hk.Render("[spc] play/pause") + hs + hd.Render("[s] stop") + hs + hd.Render("[m] mute") + hs + hd.Render("[l] line-in") + hs + hd.Render("[tab] room") + hs + hd.Render("[q] quit")
+		line2 = " " + hk.Render("[j/k] vol±5") + hs + hd.Render("[J/K] vol±1") + hs + hd.Render("[</>] prev/next") + hs + hd.Render("[r] discover")
+	}
+
+	lines := []string{line1, line2}
+
 	if m.status != "" {
-		lines = append(lines, ephemeralMsg.Render(m.status))
+		lines = append(lines, " "+ephemeralStyle.Render(m.status))
+	} else if m.discovering {
+		lines = append(lines, " "+helpDescStyle.Render("discovering speakers…"))
 	}
-	if m.discovering {
-		lines = append(lines, helpStyle.Render("  discovering speakers…"))
-	}
-	return " " + strings.Join(lines, "\n ")
+
+	return lines
 }
 
 // ── helper formatters ─────────────────────────────────────────────────────────
