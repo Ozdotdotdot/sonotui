@@ -244,7 +244,6 @@ fn run_loop(
                     || app.art_image_data.is_none());
             if should_clear_direct_art {
                 clear_direct_art(terminal.backend_mut(), art_state)?;
-                terminal.clear()?;
             }
 
             let mut art_area = None;
