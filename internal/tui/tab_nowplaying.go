@@ -79,8 +79,13 @@ func npHeaderContent(s NowPlayingState, innerW int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+// artCardContentCols/Rows are the usable cell dimensions inside the art card
+// (total 22×9 minus border 2 and padding 2/0).
+const artCardContentCols = 18
+const artCardContentRows = 7
+
 func npWideContent(s NowPlayingState, availW int) []string {
-	const artCardW = 22
+	const artCardW = artCardContentCols + 4 // border(2) + padding(2)
 	const rowGap = 2
 	trackCardW := availW - artCardW - rowGap
 	if trackCardW < 20 {

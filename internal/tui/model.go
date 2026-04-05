@@ -1171,7 +1171,8 @@ func cmdSetVolumeRel(c *Client, delta int) tea.Cmd {
 
 func cmdFetchArt(url string, proto Protocol) tea.Cmd {
 	return func() tea.Msg {
-		rendered := FetchAndRenderArt(url, proto)
+		// artCardW=22, cardH=9; content area minus border(2) and padding(2/0).
+		rendered := FetchAndRenderArt(url, proto, artCardContentCols, artCardContentRows)
 		return artFetchedMsg{url: url, data: rendered}
 	}
 }
