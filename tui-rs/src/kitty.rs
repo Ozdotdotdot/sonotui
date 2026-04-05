@@ -72,6 +72,7 @@ const GRID: &[&str] = &[
     "\u{1D243}","\u{1D244}",
 ];
 
+#[derive(Clone, Debug)]
 pub struct KittyImageData {
     pub b64_payload: String,
     pub img_width: u32,

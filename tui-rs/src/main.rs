@@ -83,6 +83,10 @@ enum AppEvent {
         url: String,
         image: Option<ArtImageData>,
     },
+    ArtEncoded {
+        signature: String,
+        data: kitty::KittyImageData,
+    },
     Sse(DaemonEvent),
     Status(String),
     Error(String),
@@ -116,6 +120,10 @@ struct DirectArtState {
     active: bool,
     area: Option<Rect>,
     signature: String,
+    /// Pre-encoded Kitty payload, keyed by signature. Populated by background task.
+    cached_kitty: Option<(String, kitty::KittyImageData)>,
+    /// Signature of an encode currently in-flight (prevents duplicate spawns).
+    encode_pending: Option<String>,
 }
 
 const STATUS_POLL_INTERVAL: u32 = 150; // ~30s at 200ms tick
@@ -201,12 +209,14 @@ fn run_loop(
             process_event(
                 app, event, &tx, &client, handle, art_mode,
                 &mut render_wanted, &mut resize_pending, &mut tick_count,
+                art_state,
             );
         }
         while let Ok(event) = rx.try_recv() {
             process_event(
                 app, event, &tx, &client, handle, art_mode,
                 &mut render_wanted, &mut resize_pending, &mut tick_count,
+                art_state,
             );
         }
 
@@ -268,6 +278,55 @@ fn run_loop(
                 ui::render_help_overlay(f, f.area(), app);
             })?;
 
+            // Kick off background Kitty encode if the signature has changed.
+            if art_mode == ArtMode::Kitty
+                && app.active_tab == Tab::NowPlaying
+                && !app.help_active
+            {
+                if let (Some(area), Some(image)) = (art_area, app.art_image_data.as_ref()) {
+                    let placement =
+                        kitty::align_image_to_area(area, image.width, image.height);
+                    let sig = format!(
+                        "{}:{}:{}:{}:{}",
+                        app.art_url, area.x, area.y, area.width, area.height
+                    );
+                    let cache_hit = art_state
+                        .cached_kitty
+                        .as_ref()
+                        .map(|(s, _)| s == &sig)
+                        .unwrap_or(false);
+                    let already_pending = art_state
+                        .encode_pending
+                        .as_ref()
+                        .map(|s| s == &sig)
+                        .unwrap_or(false);
+                    if !cache_hit && !already_pending {
+                        art_state.encode_pending = Some(sig.clone());
+                        let rgba = image.rgba.clone();
+                        let w = image.width;
+                        let h = image.height;
+                        let tx2 = tx.clone();
+                        handle.spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                let (resized, rw, rh) = kitty::resize_image_exact(
+                                    &rgba, w, h,
+                                    placement.pixel_width,
+                                    placement.pixel_height,
+                                );
+                                kitty::encode_kitty_payload(&resized, rw, rh)
+                            })
+                            .await;
+                            if let Ok(data) = result {
+                                let _ = tx2.send(AppEvent::ArtEncoded {
+                                    signature: sig,
+                                    data,
+                                });
+                            }
+                        });
+                    }
+                }
+            }
+
             sync_direct_art(terminal.backend_mut(), app, art_mode, art_area, art_state)?;
             render_wanted = false;
             last_render = Instant::now();
@@ -288,6 +347,7 @@ fn process_event(
     render_wanted: &mut bool,
     resize_pending: &mut Option<Instant>,
     tick_count: &mut u32,
+    art_state: &mut DirectArtState,
 ) {
     match event {
         AppEvent::Tick => {
@@ -449,9 +509,20 @@ fn process_event(
         }
         AppEvent::ArtLoaded { url, image } => {
             if url == app.art_url {
+                // Invalidate any cached Kitty encode — image bytes have changed.
+                art_state.cached_kitty = None;
+                art_state.encode_pending = None;
                 app.art_image_data = image;
                 *render_wanted = true;
             }
+        }
+        AppEvent::ArtEncoded { signature, data } => {
+            // Background encode finished. Store result and trigger a render.
+            if art_state.encode_pending.as_deref() == Some(&signature) {
+                art_state.encode_pending = None;
+            }
+            art_state.cached_kitty = Some((signature, data));
+            *render_wanted = true;
         }
         AppEvent::Sse(evt) => {
             handle_sse(app, evt, tx, client, handle);
@@ -1218,16 +1289,21 @@ fn sync_direct_art(
 
     match art_mode {
         ArtMode::Kitty => {
-            let placement = kitty::align_image_to_area(area, image.width, image.height);
-            let (rgba, width, height) = kitty::resize_image_exact(
-                &image.rgba,
-                image.width,
-                image.height,
-                placement.pixel_width,
-                placement.pixel_height,
-            );
-            let encoded = kitty::encode_kitty_payload(&rgba, width, height);
-            kitty::display_kitty_image(&mut stdout, &encoded, placement.area)?;
+            // Only display if the background encode for this exact signature is ready.
+            // The encode is kicked off in run_loop; we never block here.
+            if let Some((cached_sig, ref encoded)) = &state.cached_kitty {
+                if *cached_sig == signature {
+                    let placement =
+                        kitty::align_image_to_area(area, image.width, image.height);
+                    kitty::display_kitty_image(&mut stdout, encoded, placement.area)?;
+                } else {
+                    // Encode not ready yet — skip this frame, run_loop will re-render
+                    // when ArtEncoded arrives.
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
         }
         ArtMode::Halfblock => render_halfblock(&mut stdout, area, image)?,
         ArtMode::None => {}

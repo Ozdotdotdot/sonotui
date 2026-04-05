@@ -34,7 +34,7 @@ pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
     let labels: Vec<String> = ALL_TABS
         .iter()
         .enumerate()
-        .map(|(idx, tab)| format!(" {} {} ", idx + 1, tab.label()))
+        .map(|(_idx, tab)| format!(" {} ", tab.label()))
         .collect();
     let total_width: usize = labels.iter().map(|label| label.width()).sum::<usize>() + 3;
     let left_pad = tabs_area.width.saturating_sub(total_width as u16) / 2;
