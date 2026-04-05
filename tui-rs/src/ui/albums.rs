@@ -45,16 +45,30 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    if app.albums.expanded {
-        render_expanded(f, inner, app);
+    if app.albums.searching {
+        render_album_search(f, inner, app);
     } else {
-        render_list(f, inner, app);
+        render_album_columns(f, inner, app);
     }
 }
 
-fn render_list(f: &mut Frame, area: Rect, app: &App) {
-    let list_height = area.height.saturating_sub(2) as usize;
+fn render_album_columns(f: &mut Frame, area: Rect, app: &App) {
+    let chunks =
+        Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(56)]).split(area);
+    render_album_list(f, chunks[0], app);
+    render_album_preview(f, chunks[1], app);
+}
+
+fn render_album_list(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border_focus())
+        .title(" Albums ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
     let albums = visible_albums(app);
+    let list_height = inner.height.saturating_sub(1) as usize;
     let start = visible_start(app.albums.cursor, list_height, albums.len());
     let mut lines = Vec::new();
 
@@ -62,13 +76,12 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
         let album = &albums[idx];
         let text = truncate(
             &format!(
-                "{} {}  {}  {} tracks",
+                "{} {}  {}",
                 if idx == app.albums.cursor { "❯" } else { " " },
                 album.title,
-                album.artist,
-                album.track_count
+                album.artist
             ),
-            area.width as usize,
+            inner.width as usize,
         );
         let style = if idx == app.albums.cursor {
             theme::selected_row()
@@ -78,80 +91,120 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled(text, style)));
     }
 
-    while lines.len() < list_height {
+    while lines.len() < inner.height.saturating_sub(1) as usize {
         lines.push(Line::from(""));
     }
-
-    lines.push(Line::from(""));
-    let footer = if app.input_mode == crate::app::InputMode::Search {
-        format!("/{}", app.albums.search_query)
-    } else if app.status_msg.is_empty() {
-        "enter expand   a add album   / search   esc close   r rescan".to_string()
-    } else {
-        app.status_msg.clone()
-    };
-    lines.push(Line::from(Span::styled(footer, theme::help_text())));
+    lines.push(Line::from(Span::styled(
+        "hover previews tracks   enter/a add album",
+        theme::help_text(),
+    )));
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        area,
+        inner,
     );
 }
 
-fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
-    let columns =
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).split(area);
-    render_list(f, columns[0], app);
+fn render_album_preview(f: &mut Frame, area: Rect, app: &App) {
+    let title = current_album(app)
+        .map(|album| album.title.clone())
+        .unwrap_or_else(|| "Preview".to_string());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border())
+        .title(format!(" {} ", title));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     let mut lines = Vec::new();
     if let Some(album) = current_album(app) {
         lines.push(Line::from(Span::styled(
-            truncate(&album.title, columns[1].width as usize),
-            theme::title_style(),
+            truncate(&album.artist, inner.width as usize),
+            theme::artist_style(),
         )));
         lines.push(Line::from(Span::styled(
             truncate(
-                &format!(
-                    "{}  {}  {} tracks",
-                    album.artist, album.year, album.track_count
-                ),
-                columns[1].width as usize,
+                &format!("{}  {} tracks", album.year, album.track_count),
+                inner.width as usize,
             ),
-            theme::artist_style(),
+            theme::dim_style(),
         )));
         lines.push(Line::from(""));
     }
 
-    for (idx, track) in app.albums.expand_tracks.iter().enumerate() {
+    let body_rows = inner.height.saturating_sub(1) as usize;
+    let start = visible_start(0, body_rows, app.albums.expand_tracks.len());
+    for (offset, track) in app
+        .albums
+        .expand_tracks
+        .iter()
+        .skip(start)
+        .take(body_rows)
+        .enumerate()
+    {
         let duration = if track.duration > 0 {
             crate::app::format_duration(track.duration)
         } else {
             "--:--".to_string()
         };
         let text = truncate(
-            &format!(
-                "{} {:>2}  {}  {}",
-                if idx == app.albums.track_cursor {
-                    "❯"
-                } else {
-                    " "
-                },
-                idx + 1,
-                track.title,
-                duration
-            ),
-            columns[1].width as usize,
+            &format!("{:>2}  {}  {}", start + offset + 1, track.title, duration),
+            inner.width as usize,
         );
-        let style = if idx == app.albums.track_cursor {
+        lines.push(Line::from(Span::styled(text, theme::secondary_text())));
+    }
+    while lines.len() < inner.height.saturating_sub(1) as usize {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "tracks update with hovered album",
+        theme::help_text(),
+    )));
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+        inner,
+    );
+}
+
+fn render_album_search(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border_focus())
+        .title(" Search Results ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let albums = &app.albums.search_results;
+    let list_height = inner.height.saturating_sub(1) as usize;
+    let start = visible_start(app.albums.cursor, list_height, albums.len());
+    let mut lines = Vec::new();
+    for idx in start..(start + list_height).min(albums.len()) {
+        let album = &albums[idx];
+        let text = truncate(
+            &format!(
+                "{} {}  {}",
+                if idx == app.albums.cursor { "❯" } else { " " },
+                album.title,
+                album.artist
+            ),
+            inner.width as usize,
+        );
+        let style = if idx == app.albums.cursor {
             theme::selected_row()
         } else {
             theme::secondary_text()
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
-
+    while lines.len() < inner.height.saturating_sub(1) as usize {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "enter use results   esc close search",
+        theme::help_text(),
+    )));
     f.render_widget(
         Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        columns[1],
+        inner,
     );
 }
 

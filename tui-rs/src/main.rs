@@ -62,8 +62,10 @@ enum AppEvent {
     Connected(client::StatusResponse),
     QueueLoaded(Vec<client::QueueItem>),
     SpeakersLoaded(Vec<client::SpeakerInfo>),
-    LibraryLoaded {
+    LibraryColumnLoaded {
+        depth: usize,
         path: String,
+        title: String,
         entries: Vec<client::LibraryEntry>,
     },
     LibrarySearchLoaded(Vec<client::LibraryEntry>),
@@ -149,8 +151,8 @@ fn run_loop(
         let mut art_area = None;
         terminal.draw(|f| {
             let layout = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -195,7 +197,13 @@ fn run_loop(
                 spawn_sse(client.clone(), tx.clone());
                 spawn_queue_load(client.clone(), tx.clone());
                 spawn_speakers_load(client.clone(), tx.clone());
-                spawn_library_load(client.clone(), tx.clone(), "/".to_string());
+                spawn_library_column_load(
+                    client.clone(),
+                    tx.clone(),
+                    0,
+                    "/".to_string(),
+                    "Library".to_string(),
+                );
                 if app.library_ready {
                     spawn_albums_load(client.clone(), tx.clone());
                 }
@@ -212,11 +220,34 @@ fn run_loop(
             AppEvent::SpeakersLoaded(speakers) => {
                 app.speakers = speakers;
             }
-            AppEvent::LibraryLoaded { path, entries } => {
-                app.library.current_path = path;
-                app.library.entries = entries;
-                if app.library.cursor >= app.library.entries.len() {
-                    app.library.cursor = app.library.entries.len().saturating_sub(1);
+            AppEvent::LibraryColumnLoaded {
+                depth,
+                path,
+                title,
+                entries,
+            } => {
+                if depth == 0 {
+                    app.library.current_path = path.clone();
+                    app.library.entries = entries.clone();
+                    app.library.cursor = 0;
+                    app.library.columns.clear();
+                    app.library.columns.push(app::LibraryColumn {
+                        title,
+                        entries,
+                        cursor: 0,
+                    });
+                    app.library.active_column = 0;
+                    queue_library_preview(&tx, &client, app, 0);
+                } else if depth <= 2 && library_preview_matches(app, depth, &path) {
+                    app.library.columns.truncate(depth);
+                    app.library.columns.push(app::LibraryColumn {
+                        title,
+                        entries,
+                        cursor: 0,
+                    });
+                    if app.library.active_column > app.library.columns.len().saturating_sub(1) {
+                        app.library.active_column = app.library.columns.len().saturating_sub(1);
+                    }
                 }
             }
             AppEvent::LibrarySearchLoaded(results) => {
@@ -224,19 +255,34 @@ fn run_loop(
                 app.library.search_cursor = 0;
             }
             AppEvent::AlbumsLoaded(albums) => {
+                let mut albums = albums;
+                albums.sort_by(|a, b| {
+                    a.title
+                        .to_lowercase()
+                        .cmp(&b.title.to_lowercase())
+                        .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+                });
                 app.albums.albums = albums;
                 if app.albums.cursor >= app.albums.albums.len() {
                     app.albums.cursor = app.albums.albums.len().saturating_sub(1);
                 }
+                queue_album_preview(&tx, &client, app);
             }
             AppEvent::AlbumsSearchLoaded(albums) => {
+                let mut albums = albums;
+                albums.sort_by(|a, b| {
+                    a.title
+                        .to_lowercase()
+                        .cmp(&b.title.to_lowercase())
+                        .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+                });
                 app.albums.search_results = albums;
                 app.albums.cursor = 0;
+                queue_album_preview(&tx, &client, app);
             }
             AppEvent::AlbumDetailLoaded { id, detail } => {
-                if app.albums.expanded_id == id {
+                if app.albums.preview_id == id {
                     app.albums.expand_tracks = detail.tracks;
-                    app.albums.track_cursor = 0;
                 }
             }
             AppEvent::ArtLoaded { url, image } => {
@@ -582,31 +628,38 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
 
 fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
     match key.code {
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.library.cursor = app.library.cursor.saturating_sub(1)
-        }
+        KeyCode::Char('k') | KeyCode::Up => move_library_cursor(app, tx, client, -1),
         KeyCode::Char('j') | KeyCode::Down => {
-            if app.library.cursor + 1 < app.library.entries.len() {
-                app.library.cursor += 1;
-            }
+            move_library_cursor(app, tx, client, 1);
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.library.cursor = app.library.cursor.saturating_sub(page_size() / 2);
+            move_library_cursor(app, tx, client, -(page_size() as isize / 2));
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.library.cursor = (app.library.cursor + page_size() / 2)
-                .min(app.library.entries.len().saturating_sub(1));
+            move_library_cursor(app, tx, client, page_size() as isize / 2);
         }
-        KeyCode::Char('G') => app.library.cursor = app.library.entries.len().saturating_sub(1),
-        KeyCode::Backspace => spawn_library_load(
-            client.clone(),
-            tx.clone(),
-            parent_path(&app.library.current_path),
-        ),
+        KeyCode::Char('G') => {
+            set_library_cursor(
+                app,
+                tx,
+                client,
+                app.library.active_column,
+                library_column_len(app, app.library.active_column).saturating_sub(1),
+            );
+        }
+        KeyCode::Left | KeyCode::Backspace => {
+            if app.library.active_column > 0 {
+                app.library.active_column -= 1;
+                app.library.columns.truncate(app.library.active_column + 1);
+            }
+        }
+        KeyCode::Right => {
+            library_enter_column(app, tx, client);
+        }
         KeyCode::Enter => {
-            if let Some(entry) = app.library.entries.get(app.library.cursor).cloned() {
+            if let Some(entry) = library_current_entry(app).cloned() {
                 if entry.entry_type == "dir" {
-                    spawn_library_load(client.clone(), tx.clone(), entry.path);
+                    library_enter_column(app, tx, client);
                 } else {
                     spawn_queue_batch(
                         client.clone(),
@@ -622,7 +675,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
             }
         }
         KeyCode::Char('a') => {
-            if let Some(entry) = app.library.entries.get(app.library.cursor).cloned() {
+            if let Some(entry) = library_current_entry(app).cloned() {
                 let msg = if app.is_line_in {
                     "Added selection to queue. Press space to switch from line-in."
                 } else {
@@ -637,9 +690,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
             }
         }
         KeyCode::Char('A') => {
-            let paths: Vec<String> = app
-                .library
-                .entries
+            let paths: Vec<String> = library_current_entries(app)
                 .iter()
                 .filter(|entry| entry.entry_type == "file")
                 .map(|entry| entry.path.clone())
@@ -671,80 +722,36 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
     }
 
     match key.code {
-        KeyCode::Char('k') | KeyCode::Up => {
-            if app.albums.expanded {
-                app.albums.track_cursor = app.albums.track_cursor.saturating_sub(1);
-            } else {
-                app.albums.cursor = app.albums.cursor.saturating_sub(1);
-            }
-        }
+        KeyCode::Char('k') | KeyCode::Up => move_album_cursor(app, tx, client, -1),
         KeyCode::Char('j') | KeyCode::Down => {
-            if app.albums.expanded {
-                if app.albums.track_cursor + 1 < app.albums.expand_tracks.len() {
-                    app.albums.track_cursor += 1;
-                }
-            } else if app.albums.cursor + 1 < visible_albums(app).len() {
-                app.albums.cursor += 1;
-            }
+            move_album_cursor(app, tx, client, 1);
         }
-        KeyCode::Char('K') => {
-            app.albums.track_cursor = app.albums.track_cursor.saturating_sub(1);
+        KeyCode::Char('K') => move_album_cursor(app, tx, client, -1),
+        KeyCode::Char('J') => move_album_cursor(app, tx, client, 1),
+        KeyCode::Char('G') => {
+            app.albums.cursor = visible_albums(app).len().saturating_sub(1);
+            queue_album_preview(tx, client, app);
         }
-        KeyCode::Char('J') => {
-            if app.albums.track_cursor + 1 < app.albums.expand_tracks.len() {
-                app.albums.track_cursor += 1;
-            }
-        }
-        KeyCode::Char('G') => app.albums.cursor = visible_albums(app).len().saturating_sub(1),
-        KeyCode::Esc => {
-            app.albums.expanded = false;
-            app.albums.expanded_id.clear();
-            app.albums.expand_tracks.clear();
-            app.albums.track_cursor = 0;
-        }
+        KeyCode::Esc => {}
         KeyCode::Enter => {
-            if app.albums.expanded {
-                let paths: Vec<String> = app
-                    .albums
-                    .expand_tracks
-                    .iter()
-                    .map(|t| t.path.clone())
-                    .collect();
-                if !paths.is_empty() {
-                    let count = paths.len();
-                    let msg = if app.is_line_in {
-                        format!("Added {count} items to queue. Press space to switch from line-in.")
-                    } else {
-                        format!("Added {count} items to queue")
-                    };
-                    spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
-                }
-            } else if let Some(album) = current_album(app).cloned() {
-                app.albums.expanded = true;
-                app.albums.expanded_id = album.id.clone();
-                app.albums.expand_tracks.clear();
-                app.albums.track_cursor = 0;
-                spawn_album_detail_load(client.clone(), tx.clone(), album.id);
+            let paths: Vec<String> = app
+                .albums
+                .expand_tracks
+                .iter()
+                .map(|t| t.path.clone())
+                .collect();
+            if !paths.is_empty() {
+                let count = paths.len();
+                let msg = if app.is_line_in {
+                    format!("Added {count} items to queue. Press space to switch from line-in.")
+                } else {
+                    format!("Added {count} items to queue")
+                };
+                spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
             }
         }
         KeyCode::Char('a') => {
-            if app.albums.expanded {
-                let paths: Vec<String> = app
-                    .albums
-                    .expand_tracks
-                    .iter()
-                    .map(|t| t.path.clone())
-                    .collect();
-                if !paths.is_empty() {
-                    let count = paths.len();
-                    let msg = if app.is_line_in {
-                        format!("Added {count} items to queue. Press space to switch from line-in.")
-                    } else {
-                        format!("Added {count} items to queue")
-                    };
-                    spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
-                }
-            } else if let Some(album) = current_album(app).cloned() {
+            if let Some(album) = current_album(app).cloned() {
                 spawn_album_add(client.clone(), tx.clone(), album.id, app.is_line_in);
             }
         }
@@ -808,14 +815,26 @@ fn handle_library_search(
                 app.library.search_results.clear();
                 app.input_mode = InputMode::Normal;
                 if entry.entry_type == "dir" {
-                    spawn_library_load(client.clone(), tx.clone(), entry.path);
+                    spawn_library_column_load(
+                        client.clone(),
+                        tx.clone(),
+                        0,
+                        entry.path.clone(),
+                        title_for_library_path(&entry.path, &entry.name),
+                    );
                 } else {
                     let dir = entry
                         .path
                         .rsplit_once('/')
                         .map(|(parent, _)| format!("/{parent}"))
                         .unwrap_or_else(|| "/".to_string());
-                    spawn_library_load(client.clone(), tx.clone(), dir);
+                    spawn_library_column_load(
+                        client.clone(),
+                        tx.clone(),
+                        0,
+                        dir.clone(),
+                        title_for_library_path(&dir, ""),
+                    );
                 }
             }
         }
@@ -861,11 +880,7 @@ fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clie
             app.albums.searching = false;
             app.albums.search_query.clear();
             app.input_mode = InputMode::Normal;
-            if !app.albums.search_results.is_empty() {
-                app.albums.albums = app.albums.search_results.clone();
-                app.albums.search_results.clear();
-                app.albums.cursor = 0;
-            }
+            queue_album_preview(tx, client, app);
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.albums.search_query.push(ch);
@@ -1136,10 +1151,21 @@ fn spawn_speakers_load(client: DaemonClient, tx: Sender<AppEvent>) {
     });
 }
 
-fn spawn_library_load(client: DaemonClient, tx: Sender<AppEvent>, path: String) {
+fn spawn_library_column_load(
+    client: DaemonClient,
+    tx: Sender<AppEvent>,
+    depth: usize,
+    path: String,
+    title: String,
+) {
     spawn_task(tx, async move {
         let entries = client.library(&path).await?;
-        Ok(AppEvent::LibraryLoaded { path, entries })
+        Ok(AppEvent::LibraryColumnLoaded {
+            depth,
+            path,
+            title,
+            entries,
+        })
     });
 }
 
@@ -1294,17 +1320,6 @@ fn queue_position(app: &App) -> Option<i32> {
         .map(|item| item.position)
 }
 
-fn parent_path(path: &str) -> String {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.is_empty() || trimmed == "/" {
-        return "/".to_string();
-    }
-    match trimmed.rsplit_once('/') {
-        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
-        _ => "/".to_string(),
-    }
-}
-
 fn visible_albums(app: &App) -> &[client::Album] {
     if app.albums.searching && !app.albums.search_results.is_empty() {
         &app.albums.search_results
@@ -1315,4 +1330,176 @@ fn visible_albums(app: &App) -> &[client::Album] {
 
 fn current_album(app: &App) -> Option<&client::Album> {
     visible_albums(app).get(app.albums.cursor)
+}
+
+fn library_preview_matches(app: &App, depth: usize, path: &str) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    let parent_depth = depth.saturating_sub(1);
+    app.library
+        .columns
+        .get(parent_depth)
+        .and_then(|column| column.entries.get(column.cursor))
+        .map(|entry| entry.path == path)
+        .unwrap_or(false)
+}
+
+fn queue_library_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &App, depth: usize) {
+    if depth >= 2 {
+        return;
+    }
+    let Some(column) = app.library.columns.get(depth) else {
+        return;
+    };
+    let Some(entry) = column.entries.get(column.cursor) else {
+        return;
+    };
+    if entry.entry_type != "dir" {
+        return;
+    }
+    spawn_library_column_load(
+        client.clone(),
+        tx.clone(),
+        depth + 1,
+        entry.path.clone(),
+        title_for_library_entry(entry),
+    );
+}
+
+fn move_library_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize) {
+    let depth = app.library.active_column;
+    let len = library_column_len(app, depth);
+    if len == 0 {
+        return;
+    }
+    let current = library_column_cursor(app, depth);
+    let next = if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        (current + delta as usize).min(len.saturating_sub(1))
+    };
+    set_library_cursor(app, tx, client, depth, next);
+}
+
+fn set_library_cursor(
+    app: &mut App,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+    depth: usize,
+    cursor: usize,
+) {
+    if let Some(column) = app.library.columns.get_mut(depth) {
+        column.cursor = cursor.min(column.entries.len().saturating_sub(1));
+    }
+    if depth == 0 {
+        app.library.cursor = cursor.min(app.library.entries.len().saturating_sub(1));
+    }
+    app.library.columns.truncate(depth + 1);
+    queue_library_preview(tx, client, app, depth);
+}
+
+fn library_enter_column(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    let depth = app.library.active_column;
+    let Some(entry) = app
+        .library
+        .columns
+        .get(depth)
+        .and_then(|column| column.entries.get(column.cursor))
+        .cloned()
+    else {
+        return;
+    };
+    if entry.entry_type != "dir" {
+        return;
+    }
+    if app.library.columns.get(depth + 1).is_none()
+        || !library_preview_matches(app, depth + 1, &entry.path)
+    {
+        spawn_library_column_load(
+            client.clone(),
+            tx.clone(),
+            depth + 1,
+            entry.path.clone(),
+            title_for_library_entry(&entry),
+        );
+    }
+    if depth + 1 <= 2 {
+        app.library.active_column = (depth + 1).min(2);
+    }
+}
+
+fn library_column_len(app: &App, depth: usize) -> usize {
+    app.library
+        .columns
+        .get(depth)
+        .map(|column| column.entries.len())
+        .unwrap_or(0)
+}
+
+fn library_column_cursor(app: &App, depth: usize) -> usize {
+    app.library
+        .columns
+        .get(depth)
+        .map(|column| column.cursor)
+        .unwrap_or(0)
+}
+
+fn library_current_entry(app: &App) -> Option<&client::LibraryEntry> {
+    app.library
+        .columns
+        .get(app.library.active_column)
+        .and_then(|column| column.entries.get(column.cursor))
+}
+
+fn library_current_entries(app: &App) -> &[client::LibraryEntry] {
+    app.library
+        .columns
+        .get(app.library.active_column)
+        .map(|column| column.entries.as_slice())
+        .unwrap_or(&[])
+}
+
+fn title_for_library_entry(entry: &client::LibraryEntry) -> String {
+    if entry.name.is_empty() {
+        title_for_library_path(&entry.path, "")
+    } else {
+        entry.name.clone()
+    }
+}
+
+fn title_for_library_path(path: &str, fallback: &str) -> String {
+    if !fallback.is_empty() {
+        return fallback.to_string();
+    }
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        "Library".to_string()
+    } else {
+        trimmed.rsplit('/').next().unwrap_or("Library").to_string()
+    }
+}
+
+fn queue_album_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &mut App) {
+    if let Some(album) = current_album(app).cloned() {
+        if app.albums.preview_id != album.id {
+            app.albums.preview_id = album.id.clone();
+            app.albums.expand_tracks.clear();
+            spawn_album_detail_load(client.clone(), tx.clone(), album.id);
+        }
+    }
+}
+
+fn move_album_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize) {
+    let len = visible_albums(app).len();
+    if len == 0 {
+        return;
+    }
+    let next = if delta.is_negative() {
+        app.albums.cursor.saturating_sub(delta.unsigned_abs())
+    } else {
+        (app.albums.cursor + delta as usize).min(len.saturating_sub(1))
+    };
+    app.albums.cursor = next;
+    queue_album_preview(tx, client, app);
 }

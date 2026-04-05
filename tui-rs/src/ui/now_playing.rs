@@ -29,7 +29,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, placeholder_only: bool) {
 
     let art_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme::art_border())
+        .border_style(theme::now_playing_border())
         .title(" Album Art ");
     let info_block = Block::default()
         .borders(Borders::ALL)
@@ -110,7 +110,6 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Length(2),
@@ -141,19 +140,6 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     };
     f.render_widget(Paragraph::new(transport_line), chunks[0]);
 
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Speaker ", theme::dim_style()),
-            Span::styled(
-                app.active_speaker_name(),
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        chunks[1],
-    );
-
     let title = if app.track.title.is_empty() {
         "Nothing playing"
     } else {
@@ -161,7 +147,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(title, theme::title_style()))),
-        chunks[2],
+        chunks[1],
     );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -172,7 +158,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             },
             theme::artist_style(),
         ))),
-        chunks[3],
+        chunks[2],
     );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -183,7 +169,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             },
             theme::album_style(),
         ))),
-        chunks[4],
+        chunks[3],
     );
 
     let progress = if app.duration > 0 {
@@ -201,8 +187,8 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" / ", theme::dim_style()),
         Span::styled(format_duration(app.duration), theme::secondary_text()),
     ]);
-    f.render_widget(Paragraph::new(progress_line), chunks[5]);
-    render_progress_bar(f.buffer_mut(), chunks[6], progress, theme::PRIMARY);
+    f.render_widget(Paragraph::new(progress_line), chunks[4]);
+    render_progress_bar(f.buffer_mut(), chunks[5], progress, theme::PRIMARY);
 
     let volume_line = Line::from(vec![
         Span::styled("Volume ", theme::volume_style()),
@@ -213,17 +199,17 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
-    f.render_widget(Paragraph::new(volume_line), chunks[7]);
+    f.render_widget(Paragraph::new(volume_line), chunks[6]);
     render_progress_bar(
         f.buffer_mut(),
-        chunks[8],
+        chunks[7],
         (app.volume as f64 / 100.0).clamp(0.0, 1.0),
         theme::CYAN,
     );
 
     let help = "space play/pause   </> prev/next   j/k volume   tab speaker   ? help";
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(help, theme::secondary_text()))),
-        chunks[9],
+        Paragraph::new(Line::from(Span::styled(help, theme::help_text()))),
+        chunks[8],
     );
 }

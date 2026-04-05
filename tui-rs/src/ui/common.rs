@@ -1,6 +1,6 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -12,87 +12,57 @@ use crate::app::{App, InputMode, Tab, ALL_TABS};
 use crate::theme;
 
 pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let bg = Style::default().bg(theme::SURFACE).fg(theme::TEXT);
-    let transport_style = if app.is_line_in {
-        Style::default()
-            .fg(theme::TEXT)
-            .bg(theme::PLAYING_BG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        theme::transport_badge_style(&app.transport)
-    };
+    let boxes = Layout::horizontal([
+        Constraint::Length(26),
+        Constraint::Min(24),
+        Constraint::Length(20),
+    ])
+    .spacing(1)
+    .split(area);
 
-    let transport = if app.is_line_in {
-        " LIVE "
-    } else {
-        match app.transport.as_str() {
-            "PLAYING" => " PLAYING ",
-            "PAUSED_PLAYBACK" => " PAUSED ",
-            "STOPPED" => " STOPPED ",
-            "TRANSITIONING" => " LOADING ",
-            _ => " STATUS ",
-        }
-    };
-
-    let left = vec![
-        Span::styled(transport, transport_style),
-        Span::raw(" "),
-        Span::styled(
-            format!("{}  ", app.active_speaker_name()),
-            Style::default()
-                .fg(theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("vol:{}  ", app.volume),
-            theme::volume_style().bg(theme::SURFACE),
-        ),
-    ];
-
-    let summary = app.now_playing_summary();
-    let left_width: usize = left.iter().map(span_width).sum();
-    let summary_width = area.width as usize;
-    let available = summary_width.saturating_sub(left_width);
-    let summary = truncate(&summary, available.max(8));
-
-    let mut spans = left;
-    if !summary.is_empty() {
-        spans.push(Span::styled(summary, Style::default().fg(theme::TEXT_SOFT)));
-    }
-
-    f.render_widget(Paragraph::new(Line::from(spans)).style(bg), area);
+    render_header_left(f, boxes[0], app);
+    render_header_center(f, boxes[1], app);
+    render_header_right(f, boxes[2], app);
 }
 
 pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::shell_block());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
     let bg = theme::tab_row_bg();
     let labels: Vec<String> = ALL_TABS
         .iter()
         .enumerate()
-        .map(|(idx, tab)| format!("  {} {}  ", idx + 1, tab.label()))
+        .map(|(idx, tab)| format!(" {} {} ", idx + 1, tab.label()))
         .collect();
-    let total_width: usize = labels.iter().map(|label| label.width()).sum::<usize>() + 3 * 2;
-    let left_pad = area.width.saturating_sub(total_width as u16) / 2;
+    let total_width: usize = labels.iter().map(|label| label.width()).sum::<usize>() + 3 * 1;
+    let left_pad = inner.width.saturating_sub(total_width as u16) / 2;
 
     let mut spans = Vec::new();
     if left_pad > 0 {
         spans.push(Span::styled(" ".repeat(left_pad as usize), bg));
     }
-
     for (idx, tab) in ALL_TABS.iter().enumerate() {
         let style = if *tab == app.active_tab {
             theme::tab_active()
         } else {
-            theme::tab_inactive().bg(theme::SURFACE)
+            theme::tab_inactive().bg(theme::BG)
         };
         spans.push(Span::styled(labels[idx].clone(), style));
         if idx < ALL_TABS.len() - 1 {
-            spans.push(Span::styled("   ", bg));
+            spans.push(Span::styled(" ", bg));
         }
     }
 
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line).style(bg).alignment(Alignment::Left);
-    f.render_widget(paragraph, area);
+    f.render_widget(
+        Paragraph::new(Line::from(spans))
+            .style(bg)
+            .alignment(Alignment::Left),
+        inner,
+    );
 }
 
 pub fn render_command_line(f: &mut Frame, area: Rect, app: &App) {
@@ -126,7 +96,7 @@ pub fn render_command_line(f: &mut Frame, area: Rect, app: &App) {
                 app.status_msg.clone()
             };
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(text, theme::status_style()))).style(base),
+                Paragraph::new(Line::from(Span::styled(text, theme::help_text()))).style(base),
                 area,
             );
         }
@@ -180,24 +150,18 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
                 .fg(theme::TEXT)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled("1-4 switch tabs", theme::help_text())),
-        Line::from(Span::styled("gt / gT cycle tabs", theme::help_text())),
-        Line::from(Span::styled("space play/pause", theme::help_text())),
-        Line::from(Span::styled("s stop", theme::help_text())),
-        Line::from(Span::styled("</> previous/next", theme::help_text())),
-        Line::from(Span::styled(
-            "j/k volume on Now Playing",
-            theme::help_text(),
-        )),
-        Line::from(Span::styled(
-            "J/K fine volume on Now Playing",
-            theme::help_text(),
-        )),
-        Line::from(Span::styled("tab cycle speaker", theme::help_text())),
-        Line::from(Span::styled("l switch to line-in", theme::help_text())),
-        Line::from(Span::styled(": command line", theme::help_text())),
-        Line::from(Span::styled("? help", theme::help_text())),
-        Line::from(Span::styled("q quit", theme::help_text())),
+        line("1-4 switch tabs"),
+        line("gt / gT cycle tabs"),
+        line("space play/pause"),
+        line("s stop"),
+        line("</> previous/next"),
+        line("j/k volume on Now Playing"),
+        line("J/K fine volume on Now Playing"),
+        line("tab cycle speaker"),
+        line("l switch to line-in"),
+        line(": command line"),
+        line("? help"),
+        line("q quit"),
         Line::from(""),
     ];
 
@@ -207,64 +171,29 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
                 "Now Playing",
                 theme::title_style(),
             )));
-            lines.push(Line::from(Span::styled(
-                "Album art is rendered directly to the terminal",
-                theme::help_text(),
-            )));
+            lines.push(line("Album art is rendered directly to the terminal"));
         }
         Tab::Queue => {
             lines.push(Line::from(Span::styled("Queue", theme::title_style())));
-            lines.push(Line::from(Span::styled(
-                "p play from cursor",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "dd delete item",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "D clear queue",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled("J/K reorder", theme::help_text())));
+            lines.push(line("p play from cursor"));
+            lines.push(line("dd delete item"));
+            lines.push(line("D clear queue"));
+            lines.push(line("J/K reorder"));
         }
         Tab::Library => {
             lines.push(Line::from(Span::styled("Library", theme::title_style())));
-            lines.push(Line::from(Span::styled(
-                "enter open directory or add file",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "a add selection",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "A add all files in folder",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "backspace go up",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled("/ search", theme::help_text())));
-            lines.push(Line::from(Span::styled(
-                "ctrl+n / ctrl+p search next/prev",
-                theme::help_text(),
-            )));
+            lines.push(line("left/right move between columns"));
+            lines.push(line("enter add track or enter directory column"));
+            lines.push(line("a add selection"));
+            lines.push(line("A add all files in current column"));
+            lines.push(line("/ search"));
         }
         Tab::Albums => {
             lines.push(Line::from(Span::styled("Albums", theme::title_style())));
-            lines.push(Line::from(Span::styled(
-                "enter expand or add expanded album",
-                theme::help_text(),
-            )));
-            lines.push(Line::from(Span::styled("a add album", theme::help_text())));
-            lines.push(Line::from(Span::styled("/ search", theme::help_text())));
-            lines.push(Line::from(Span::styled("esc collapse", theme::help_text())));
-            lines.push(Line::from(Span::styled(
-                "r show rescan status message",
-                theme::help_text(),
-            )));
+            lines.push(line("hovered album previews tracks"));
+            lines.push(line("enter add previewed album"));
+            lines.push(line("a add album"));
+            lines.push(line("/ search"));
         }
     }
 
@@ -297,8 +226,101 @@ pub fn render_progress_bar(buf: &mut Buffer, area: Rect, ratio: f64, fill_color:
     }
 }
 
-fn span_width(span: &Span<'_>) -> usize {
-    span.content.as_ref().width()
+fn render_header_left(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border())
+        .title(" Speaker ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line = if inner.width >= 18 {
+        format!("sonotui  •  {}", app.active_speaker_name())
+    } else {
+        app.active_speaker_name().to_string()
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&line, inner.width as usize),
+            theme::title_style(),
+        )))
+        .alignment(Alignment::Center),
+        inner,
+    );
+}
+
+fn render_header_center(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border_focus())
+        .title(" Now Playing ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let title = if app.track.title.is_empty() {
+        "Nothing playing"
+    } else {
+        &app.track.title
+    };
+    let artist = if app.track.artist.is_empty() {
+        "Unknown artist"
+    } else {
+        &app.track.artist
+    };
+    let album = app.current_album_name();
+    let line = if inner.width >= 44 {
+        Line::from(vec![
+            Span::styled(truncate(&album, 24), theme::dim_style()),
+            Span::styled("  /  ", theme::dim_style()),
+            Span::styled(truncate(title, 26), theme::title_style()),
+            Span::styled("  •  ", theme::dim_style()),
+            Span::styled(truncate(artist, 20), theme::secondary_text()),
+        ])
+    } else if inner.width >= 28 {
+        Line::from(vec![
+            Span::styled(truncate(title, 24), theme::title_style()),
+            Span::styled("  •  ", theme::dim_style()),
+            Span::styled(truncate(artist, 16), theme::secondary_text()),
+        ])
+    } else {
+        Line::from(Span::styled(
+            truncate(title, inner.width as usize),
+            theme::title_style(),
+        ))
+    };
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
+}
+
+fn render_header_right(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::pane_border())
+        .title(" Status ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line = if app.is_line_in {
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(theme::SUCCESS)),
+            Span::styled("Line-In", theme::transport_style("PLAYING")),
+            Span::styled("  ", theme::dim_style()),
+            Span::styled(format!("vol {}%", app.volume), theme::volume_style()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                "● ",
+                Style::default().fg(theme::transport_color(&app.transport)),
+            ),
+            Span::styled(
+                app.transport_label(),
+                theme::transport_style(&app.transport),
+            ),
+            Span::styled("  ", theme::dim_style()),
+            Span::styled(format!("vol {}%", app.volume), theme::volume_style()),
+        ])
+    };
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Center), inner);
 }
 
 fn truncate(input: &str, width: usize) -> String {
@@ -318,4 +340,8 @@ fn truncate(input: &str, width: usize) -> String {
         out.push('…');
         out
     }
+}
+
+fn line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(text.to_string(), theme::help_text()))
 }

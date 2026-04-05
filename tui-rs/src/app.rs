@@ -49,7 +49,6 @@ pub enum InputMode {
 }
 
 pub struct App {
-    pub client: DaemonClient,
     pub connected: bool,
 
     // Playback state
@@ -99,7 +98,6 @@ pub struct ArtImageData {
 pub struct QueueState {
     pub items: Vec<QueueItem>,
     pub cursor: usize,
-    pub playing_pos: i32,
     pub dd_pending: bool,
     pub confirm_clear: bool,
 }
@@ -108,19 +106,25 @@ pub struct LibraryState {
     pub current_path: String,
     pub entries: Vec<LibraryEntry>,
     pub cursor: usize,
+    pub columns: Vec<LibraryColumn>,
+    pub active_column: usize,
     pub searching: bool,
     pub search_query: String,
     pub search_results: Vec<LibraryEntry>,
     pub search_cursor: usize,
 }
 
+pub struct LibraryColumn {
+    pub title: String,
+    pub entries: Vec<LibraryEntry>,
+    pub cursor: usize,
+}
+
 pub struct AlbumState {
     pub albums: Vec<Album>,
     pub cursor: usize,
-    pub expanded: bool,
-    pub expanded_id: String,
     pub expand_tracks: Vec<LibraryEntry>,
-    pub track_cursor: usize,
+    pub preview_id: String,
     pub searching: bool,
     pub search_query: String,
     pub search_results: Vec<Album>,
@@ -130,8 +134,8 @@ pub struct AlbumState {
 
 impl App {
     pub fn new(client: DaemonClient) -> Self {
+        let _ = client;
         Self {
-            client,
             connected: false,
             transport: "STOPPED".to_string(),
             track: TrackInfo::default(),
@@ -155,7 +159,6 @@ impl App {
             queue: QueueState {
                 items: Vec::new(),
                 cursor: 0,
-                playing_pos: 0,
                 dd_pending: false,
                 confirm_clear: false,
             },
@@ -163,6 +166,8 @@ impl App {
                 current_path: String::new(),
                 entries: Vec::new(),
                 cursor: 0,
+                columns: Vec::new(),
+                active_column: 0,
                 searching: false,
                 search_query: String::new(),
                 search_results: Vec::new(),
@@ -171,10 +176,8 @@ impl App {
             albums: AlbumState {
                 albums: Vec::new(),
                 cursor: 0,
-                expanded: false,
-                expanded_id: String::new(),
                 expand_tracks: Vec::new(),
-                track_cursor: 0,
+                preview_id: String::new(),
                 searching: false,
                 search_query: String::new(),
                 search_results: Vec::new(),
@@ -244,21 +247,11 @@ impl App {
             .unwrap_or("No speaker")
     }
 
-    pub fn now_playing_summary(&self) -> String {
-        if self.is_line_in {
-            return "Line-In".to_string();
-        }
-        let mut parts = Vec::new();
-        if !self.track.title.is_empty() {
-            parts.push(self.track.title.clone());
-        }
-        if !self.track.artist.is_empty() {
-            parts.push(self.track.artist.clone());
-        }
-        if parts.is_empty() {
-            "Nothing queued".to_string()
+    pub fn current_album_name(&self) -> String {
+        if self.track.album.is_empty() {
+            "Unknown album".to_string()
         } else {
-            parts.join("  •  ")
+            self.track.album.clone()
         }
     }
 }
