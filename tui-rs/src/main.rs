@@ -1,0 +1,1315 @@
+mod app;
+mod client;
+mod kitty;
+mod theme;
+mod ui;
+
+use std::{
+    io::{self, Stdout, Write},
+    sync::mpsc::{self, Receiver, Sender},
+    time::Duration,
+};
+
+use anyhow::{Context, Result};
+use app::{App, ArtImageData, InputMode, Tab};
+use clap::{Parser, ValueEnum};
+use client::{DaemonClient, DaemonEvent};
+use crossterm::{
+    cursor::MoveTo,
+    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{
+        self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    },
+};
+use image::ImageReader;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Layout, Rect},
+    Terminal,
+};
+
+#[derive(Parser, Debug)]
+#[command(name = "sonotui")]
+struct Args {
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 8989)]
+    port: u16,
+    #[arg(long, default_value = "auto")]
+    art: ArtCliMode,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ArtCliMode {
+    Auto,
+    Kitty,
+    Halfblock,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtMode {
+    Kitty,
+    Halfblock,
+    None,
+}
+
+#[derive(Debug)]
+enum AppEvent {
+    Tick,
+    Key(KeyEvent),
+    Connected(client::StatusResponse),
+    QueueLoaded(Vec<client::QueueItem>),
+    SpeakersLoaded(Vec<client::SpeakerInfo>),
+    LibraryLoaded {
+        path: String,
+        entries: Vec<client::LibraryEntry>,
+    },
+    LibrarySearchLoaded(Vec<client::LibraryEntry>),
+    AlbumsLoaded(Vec<client::Album>),
+    AlbumsSearchLoaded(Vec<client::Album>),
+    AlbumDetailLoaded {
+        id: String,
+        detail: client::AlbumDetail,
+    },
+    ArtLoaded {
+        url: String,
+        image: Option<ArtImageData>,
+    },
+    Sse(DaemonEvent),
+    Status(String),
+    Error(String),
+}
+
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode().context("enable raw mode")?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend).context("create terminal")?;
+        Ok(Self { terminal })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+#[derive(Default)]
+struct DirectArtState {
+    active: bool,
+    area: Option<Rect>,
+    signature: String,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let client = DaemonClient::new(&args.host, args.port);
+    let art_mode = detect_art_mode(args.art);
+    let mut app = App::new(client.clone());
+    let (tx, rx) = mpsc::channel();
+
+    spawn_tick_thread(tx.clone(), Duration::from_millis(250));
+    spawn_input_thread(tx.clone());
+    spawn_status_load(client.clone(), tx.clone());
+
+    let mut term = TerminalGuard::new()?;
+    let mut art_state = DirectArtState::default();
+    run_loop(
+        &mut term.terminal,
+        &mut app,
+        rx,
+        tx,
+        client,
+        art_mode,
+        &mut art_state,
+    )
+}
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    rx: Receiver<AppEvent>,
+    tx: Sender<AppEvent>,
+    client: DaemonClient,
+    art_mode: ArtMode,
+    art_state: &mut DirectArtState,
+) -> Result<()> {
+    loop {
+        let mut art_area = None;
+        terminal.draw(|f| {
+            let layout = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+
+            ui::render_tab_bar(f, layout[0], app);
+
+            if !app.connected {
+                ui::common::render_connecting(f, layout[1], app);
+            } else {
+                match app.active_tab {
+                    Tab::NowPlaying => {
+                        ui::now_playing::render(f, layout[1], app, art_mode == ArtMode::None);
+                        art_area = Some(ui::now_playing::art_area(layout[1], app));
+                    }
+                    Tab::Queue => ui::queue::render(f, layout[1], app),
+                    Tab::Library => ui::library::render(f, layout[1], app),
+                    Tab::Albums => ui::albums::render(f, layout[1], app),
+                }
+            }
+
+            ui::render_command_line(f, layout[2], app);
+            ui::render_help_overlay(f, f.area(), app);
+        })?;
+
+        sync_direct_art(terminal.backend_mut(), app, art_mode, art_area, art_state)?;
+
+        match rx.recv().context("event channel closed")? {
+            AppEvent::Tick => app.clear_expired_status(),
+            AppEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                handle_key(app, key, &tx, &client);
+            }
+            AppEvent::Key(_) => {}
+            AppEvent::Connected(status) => {
+                app.apply_status(status);
+                app.albums.scan_status = if app.library_ready {
+                    "done".to_string()
+                } else {
+                    "scanning".to_string()
+                };
+                spawn_sse(client.clone(), tx.clone());
+                spawn_queue_load(client.clone(), tx.clone());
+                spawn_speakers_load(client.clone(), tx.clone());
+                spawn_library_load(client.clone(), tx.clone(), "/".to_string());
+                if app.library_ready {
+                    spawn_albums_load(client.clone(), tx.clone());
+                }
+                if !app.art_url.is_empty() {
+                    spawn_art_load(client.clone(), tx.clone(), app.art_url.clone());
+                }
+            }
+            AppEvent::QueueLoaded(items) => {
+                app.queue.items = items;
+                if app.queue.cursor >= app.queue.items.len() {
+                    app.queue.cursor = app.queue.items.len().saturating_sub(1);
+                }
+            }
+            AppEvent::SpeakersLoaded(speakers) => {
+                app.speakers = speakers;
+            }
+            AppEvent::LibraryLoaded { path, entries } => {
+                app.library.current_path = path;
+                app.library.entries = entries;
+                if app.library.cursor >= app.library.entries.len() {
+                    app.library.cursor = app.library.entries.len().saturating_sub(1);
+                }
+            }
+            AppEvent::LibrarySearchLoaded(results) => {
+                app.library.search_results = results;
+                app.library.search_cursor = 0;
+            }
+            AppEvent::AlbumsLoaded(albums) => {
+                app.albums.albums = albums;
+                if app.albums.cursor >= app.albums.albums.len() {
+                    app.albums.cursor = app.albums.albums.len().saturating_sub(1);
+                }
+            }
+            AppEvent::AlbumsSearchLoaded(albums) => {
+                app.albums.search_results = albums;
+                app.albums.cursor = 0;
+            }
+            AppEvent::AlbumDetailLoaded { id, detail } => {
+                if app.albums.expanded_id == id {
+                    app.albums.expand_tracks = detail.tracks;
+                    app.albums.track_cursor = 0;
+                }
+            }
+            AppEvent::ArtLoaded { url, image } => {
+                if url == app.art_url {
+                    app.art_image_data = image;
+                }
+            }
+            AppEvent::Sse(evt) => handle_sse(app, evt, &tx, &client),
+            AppEvent::Status(msg) => app.set_status(msg),
+            AppEvent::Error(err) => app.set_status(err),
+        }
+
+        if app.should_quit {
+            clear_direct_art(terminal.backend_mut(), art_state)?;
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    match evt.kind.as_str() {
+        "transport" => {
+            if let Some(state) = evt.payload.get("state").and_then(|v| v.as_str()) {
+                app.transport = state.to_string();
+            }
+        }
+        "track" => {
+            if let Some(title) = evt.payload.get("title").and_then(|v| v.as_str()) {
+                app.track.title = title.to_string();
+            }
+            if let Some(artist) = evt.payload.get("artist").and_then(|v| v.as_str()) {
+                app.track.artist = artist.to_string();
+            }
+            if let Some(album) = evt.payload.get("album").and_then(|v| v.as_str()) {
+                app.track.album = album.to_string();
+            }
+            if let Some(duration) = evt.payload.get("duration").and_then(|v| v.as_i64()) {
+                app.duration = duration as i32;
+                app.track.duration = duration as i32;
+            }
+            if let Some(url) = evt.payload.get("art_url").and_then(|v| v.as_str()) {
+                if url != app.art_url {
+                    app.art_url = url.to_string();
+                    app.track.art_url = url.to_string();
+                    app.art_image_data = None;
+                    if !url.is_empty() {
+                        spawn_art_load(client.clone(), tx.clone(), url.to_string());
+                    }
+                }
+            }
+        }
+        "position" => {
+            if let Some(elapsed) = evt.payload.get("elapsed").and_then(|v| v.as_i64()) {
+                app.elapsed = elapsed as i32;
+            }
+            if let Some(duration) = evt.payload.get("duration").and_then(|v| v.as_i64()) {
+                app.duration = duration as i32;
+            }
+        }
+        "volume" => {
+            if let Some(volume) = evt.payload.get("value").and_then(|v| v.as_i64()) {
+                app.volume = volume as i32;
+            }
+        }
+        "linein" => {
+            if let Some(active) = evt.payload.get("active").and_then(|v| v.as_bool()) {
+                app.is_line_in = active;
+            }
+        }
+        "queue_changed" => spawn_queue_load(client.clone(), tx.clone()),
+        "speaker" => {
+            let name = evt
+                .payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let uuid = evt
+                .payload
+                .get("uuid")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            app.speaker = Some(client::SpeakerInfo {
+                name: name.to_string(),
+                uuid: uuid.to_string(),
+                ip: String::new(),
+            });
+            spawn_speakers_load(client.clone(), tx.clone());
+        }
+        "library_scan" => {
+            if let Some(status) = evt.payload.get("status").and_then(|v| v.as_str()) {
+                app.albums.scan_status = status.to_string();
+                app.library_ready = status == "done";
+            }
+            if let Some(progress) = evt.payload.get("progress").and_then(|v| v.as_f64()) {
+                app.albums.scan_progress = progress;
+            }
+            if app.library_ready && app.albums.albums.is_empty() {
+                spawn_albums_load(client.clone(), tx.clone());
+            }
+        }
+        "error" => {
+            if let Some(msg) = evt.payload.get("message").and_then(|v| v.as_str()) {
+                app.set_status(format!("Daemon: {msg}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    if app.help_active {
+        if matches!(
+            key.code,
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+        ) {
+            app.help_active = false;
+        }
+        return;
+    }
+
+    if app.input_mode == InputMode::Command {
+        handle_command_input(app, key, tx, client);
+        return;
+    }
+
+    if app.input_mode == InputMode::Search {
+        match app.active_tab {
+            Tab::Library => handle_library_search(app, key, tx, client),
+            Tab::Albums => handle_album_search(app, key, tx, client),
+            _ => {}
+        }
+        return;
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        app.should_quit = true;
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => {
+            app.should_quit = true;
+            return;
+        }
+        KeyCode::Char('?') => {
+            app.help_active = true;
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char(':') => {
+            app.input_mode = InputMode::Command;
+            app.cmd_input.clear();
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char('1') => {
+            app.active_tab = Tab::NowPlaying;
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char('2') => {
+            app.active_tab = Tab::Queue;
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char('3') => {
+            app.active_tab = Tab::Library;
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char('4') => {
+            app.active_tab = Tab::Albums;
+            app.g_pending = false;
+            if app.library_ready && app.albums.albums.is_empty() {
+                spawn_albums_load(client.clone(), tx.clone());
+            }
+            return;
+        }
+        KeyCode::Char('g') => {
+            if app.g_pending {
+                match app.active_tab {
+                    Tab::Queue => app.queue.cursor = 0,
+                    Tab::Library => {
+                        if app.library.searching {
+                            app.library.search_cursor = 0;
+                        } else {
+                            app.library.cursor = 0;
+                        }
+                    }
+                    Tab::Albums => app.albums.cursor = 0,
+                    Tab::NowPlaying => {}
+                }
+                app.g_pending = false;
+            } else {
+                app.g_pending = true;
+            }
+            return;
+        }
+        KeyCode::Char('t') if app.g_pending => {
+            app.active_tab = app.active_tab.next();
+            app.g_pending = false;
+            return;
+        }
+        KeyCode::Char('T') if app.g_pending => {
+            app.active_tab = app.active_tab.prev();
+            app.g_pending = false;
+            return;
+        }
+        _ => {}
+    }
+
+    app.g_pending = false;
+
+    match key.code {
+        KeyCode::Char(' ') => {
+            let transport = app.transport.clone();
+            let line_in = app.is_line_in;
+            let queue_len = app.queue.items.len();
+            let client = client.clone();
+            spawn_task(tx.clone(), async move {
+                if transport == "PLAYING" && !line_in {
+                    client.pause().await?;
+                } else if line_in && queue_len > 0 {
+                    client.queue_play(1).await?;
+                } else {
+                    client.play().await?;
+                }
+                Ok(AppEvent::Status(String::new()))
+            });
+        }
+        KeyCode::Char('s') => spawn_simple(client.clone(), tx.clone(), SimpleAction::Stop),
+        KeyCode::Char('<') | KeyCode::Char(',') => {
+            spawn_simple(client.clone(), tx.clone(), SimpleAction::Prev)
+        }
+        KeyCode::Char('>') | KeyCode::Char('.') => {
+            spawn_simple(client.clone(), tx.clone(), SimpleAction::Next)
+        }
+        KeyCode::Char('l') => spawn_simple(client.clone(), tx.clone(), SimpleAction::LineIn),
+        KeyCode::Tab => {
+            if let Some(uuid) = app.cycle_speaker() {
+                spawn_set_speaker(client.clone(), tx.clone(), uuid);
+            }
+        }
+        _ => match app.active_tab {
+            Tab::NowPlaying => handle_now_playing_key(key, tx, client),
+            Tab::Queue => handle_queue_key(app, key, tx, client),
+            Tab::Library => handle_library_key(app, key, tx, client),
+            Tab::Albums => handle_album_key(app, key, tx, client),
+        },
+    }
+}
+
+fn handle_now_playing_key(key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => spawn_volume(client.clone(), tx.clone(), 5),
+        KeyCode::Char('j') | KeyCode::Down => spawn_volume(client.clone(), tx.clone(), -5),
+        KeyCode::Char('K') => spawn_volume(client.clone(), tx.clone(), 1),
+        KeyCode::Char('J') => spawn_volume(client.clone(), tx.clone(), -1),
+        _ => {}
+    }
+}
+
+fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    if app.queue.confirm_clear {
+        match key.code {
+            KeyCode::Char('y') => {
+                app.queue.confirm_clear = false;
+                spawn_queue_clear(client.clone(), tx.clone());
+            }
+            KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                app.queue.confirm_clear = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.queue.cursor = app.queue.cursor.saturating_sub(1);
+            app.queue.dd_pending = false;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.queue.cursor + 1 < app.queue.items.len() {
+                app.queue.cursor += 1;
+            }
+            app.queue.dd_pending = false;
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let delta = page_size();
+            app.queue.cursor = app.queue.cursor.saturating_sub(delta / 2);
+            app.queue.dd_pending = false;
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let delta = page_size();
+            app.queue.cursor =
+                (app.queue.cursor + delta / 2).min(app.queue.items.len().saturating_sub(1));
+            app.queue.dd_pending = false;
+        }
+        KeyCode::Char('G') => {
+            app.queue.cursor = app.queue.items.len().saturating_sub(1);
+            app.queue.dd_pending = false;
+        }
+        KeyCode::Char('p') => {
+            if let Some(pos) = queue_position(app) {
+                spawn_queue_play(client.clone(), tx.clone(), pos);
+            }
+        }
+        KeyCode::Char('d') => {
+            if app.queue.dd_pending {
+                app.queue.dd_pending = false;
+                if let Some(pos) = queue_position(app) {
+                    spawn_queue_delete(client.clone(), tx.clone(), pos);
+                }
+            } else {
+                app.queue.dd_pending = true;
+            }
+        }
+        KeyCode::Char('D') => app.queue.confirm_clear = true,
+        KeyCode::Char('J') => {
+            if let Some(pos) = queue_position(app) {
+                if (pos as usize) < app.queue.items.len() {
+                    if app.queue.cursor + 1 < app.queue.items.len() {
+                        app.queue.cursor += 1;
+                    }
+                    spawn_queue_reorder(client.clone(), tx.clone(), pos, pos + 1);
+                }
+            }
+        }
+        KeyCode::Char('K') => {
+            if let Some(pos) = queue_position(app) {
+                if pos > 1 {
+                    app.queue.cursor = app.queue.cursor.saturating_sub(1);
+                    spawn_queue_reorder(client.clone(), tx.clone(), pos, pos - 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.library.cursor = app.library.cursor.saturating_sub(1)
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.library.cursor + 1 < app.library.entries.len() {
+                app.library.cursor += 1;
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.library.cursor = app.library.cursor.saturating_sub(page_size() / 2);
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.library.cursor = (app.library.cursor + page_size() / 2)
+                .min(app.library.entries.len().saturating_sub(1));
+        }
+        KeyCode::Char('G') => app.library.cursor = app.library.entries.len().saturating_sub(1),
+        KeyCode::Backspace => spawn_library_load(
+            client.clone(),
+            tx.clone(),
+            parent_path(&app.library.current_path),
+        ),
+        KeyCode::Enter => {
+            if let Some(entry) = app.library.entries.get(app.library.cursor).cloned() {
+                if entry.entry_type == "dir" {
+                    spawn_library_load(client.clone(), tx.clone(), entry.path);
+                } else {
+                    spawn_queue_batch(
+                        client.clone(),
+                        tx.clone(),
+                        vec![entry.path],
+                        if app.is_line_in {
+                            "Added 1 item to queue. Press space to switch from line-in.".to_string()
+                        } else {
+                            "Added 1 item to queue".to_string()
+                        },
+                    );
+                }
+            }
+        }
+        KeyCode::Char('a') => {
+            if let Some(entry) = app.library.entries.get(app.library.cursor).cloned() {
+                let msg = if app.is_line_in {
+                    "Added selection to queue. Press space to switch from line-in."
+                } else {
+                    "Added selection to queue"
+                };
+                spawn_queue_batch(
+                    client.clone(),
+                    tx.clone(),
+                    vec![entry.path],
+                    msg.to_string(),
+                );
+            }
+        }
+        KeyCode::Char('A') => {
+            let paths: Vec<String> = app
+                .library
+                .entries
+                .iter()
+                .filter(|entry| entry.entry_type == "file")
+                .map(|entry| entry.path.clone())
+                .collect();
+            if !paths.is_empty() {
+                let count = paths.len();
+                let msg = if app.is_line_in {
+                    format!("Added {count} items to queue. Press space to switch from line-in.")
+                } else {
+                    format!("Added {count} items to queue")
+                };
+                spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
+            }
+        }
+        KeyCode::Char('/') => {
+            app.library.searching = true;
+            app.library.search_query.clear();
+            app.library.search_results.clear();
+            app.library.search_cursor = 0;
+            app.input_mode = InputMode::Search;
+        }
+        _ => {}
+    }
+}
+
+fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    if !app.library_ready {
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => {
+            if app.albums.expanded {
+                app.albums.track_cursor = app.albums.track_cursor.saturating_sub(1);
+            } else {
+                app.albums.cursor = app.albums.cursor.saturating_sub(1);
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.albums.expanded {
+                if app.albums.track_cursor + 1 < app.albums.expand_tracks.len() {
+                    app.albums.track_cursor += 1;
+                }
+            } else if app.albums.cursor + 1 < visible_albums(app).len() {
+                app.albums.cursor += 1;
+            }
+        }
+        KeyCode::Char('K') => {
+            app.albums.track_cursor = app.albums.track_cursor.saturating_sub(1);
+        }
+        KeyCode::Char('J') => {
+            if app.albums.track_cursor + 1 < app.albums.expand_tracks.len() {
+                app.albums.track_cursor += 1;
+            }
+        }
+        KeyCode::Char('G') => app.albums.cursor = visible_albums(app).len().saturating_sub(1),
+        KeyCode::Esc => {
+            app.albums.expanded = false;
+            app.albums.expanded_id.clear();
+            app.albums.expand_tracks.clear();
+            app.albums.track_cursor = 0;
+        }
+        KeyCode::Enter => {
+            if app.albums.expanded {
+                let paths: Vec<String> = app
+                    .albums
+                    .expand_tracks
+                    .iter()
+                    .map(|t| t.path.clone())
+                    .collect();
+                if !paths.is_empty() {
+                    let count = paths.len();
+                    let msg = if app.is_line_in {
+                        format!("Added {count} items to queue. Press space to switch from line-in.")
+                    } else {
+                        format!("Added {count} items to queue")
+                    };
+                    spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
+                }
+            } else if let Some(album) = current_album(app).cloned() {
+                app.albums.expanded = true;
+                app.albums.expanded_id = album.id.clone();
+                app.albums.expand_tracks.clear();
+                app.albums.track_cursor = 0;
+                spawn_album_detail_load(client.clone(), tx.clone(), album.id);
+            }
+        }
+        KeyCode::Char('a') => {
+            if app.albums.expanded {
+                let paths: Vec<String> = app
+                    .albums
+                    .expand_tracks
+                    .iter()
+                    .map(|t| t.path.clone())
+                    .collect();
+                if !paths.is_empty() {
+                    let count = paths.len();
+                    let msg = if app.is_line_in {
+                        format!("Added {count} items to queue. Press space to switch from line-in.")
+                    } else {
+                        format!("Added {count} items to queue")
+                    };
+                    spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
+                }
+            } else if let Some(album) = current_album(app).cloned() {
+                spawn_album_add(client.clone(), tx.clone(), album.id, app.is_line_in);
+            }
+        }
+        KeyCode::Char('/') => {
+            app.albums.searching = true;
+            app.albums.search_query.clear();
+            app.albums.search_results.clear();
+            app.input_mode = InputMode::Search;
+        }
+        KeyCode::Char('r') => app.set_status("Rescanning library…"),
+        _ => {}
+    }
+}
+
+fn handle_library_search(
+    app: &mut App,
+    key: KeyEvent,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            app.library.searching = false;
+            app.library.search_query.clear();
+            app.library.search_results.clear();
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.library.search_query.pop();
+            if app.library.search_query.is_empty() {
+                app.library.search_results.clear();
+            } else {
+                spawn_library_search(client.clone(), tx.clone(), app.library.search_query.clone());
+            }
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.library.search_cursor + 1 < app.library.search_results.len() {
+                app.library.search_cursor += 1;
+            }
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.library.search_cursor = app.library.search_cursor.saturating_sub(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.library.search_cursor = app.library.search_cursor.saturating_sub(1);
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.library.search_cursor + 1 < app.library.search_results.len() {
+                app.library.search_cursor += 1;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(entry) = app
+                .library
+                .search_results
+                .get(app.library.search_cursor)
+                .cloned()
+            {
+                app.library.searching = false;
+                app.library.search_query.clear();
+                app.library.search_results.clear();
+                app.input_mode = InputMode::Normal;
+                if entry.entry_type == "dir" {
+                    spawn_library_load(client.clone(), tx.clone(), entry.path);
+                } else {
+                    let dir = entry
+                        .path
+                        .rsplit_once('/')
+                        .map(|(parent, _)| format!("/{parent}"))
+                        .unwrap_or_else(|| "/".to_string());
+                    spawn_library_load(client.clone(), tx.clone(), dir);
+                }
+            }
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.library.search_query.push(ch);
+            spawn_library_search(client.clone(), tx.clone(), app.library.search_query.clone());
+        }
+        _ => {}
+    }
+}
+
+fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    match key.code {
+        KeyCode::Esc => {
+            app.albums.searching = false;
+            app.albums.search_query.clear();
+            app.albums.search_results.clear();
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.albums.search_query.pop();
+            if app.albums.search_query.is_empty() {
+                app.albums.search_results.clear();
+            } else {
+                spawn_albums_search(client.clone(), tx.clone(), app.albums.search_query.clone());
+            }
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.albums.cursor + 1 < app.albums.search_results.len() {
+                app.albums.cursor += 1;
+            }
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.albums.cursor = app.albums.cursor.saturating_sub(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.albums.cursor = app.albums.cursor.saturating_sub(1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.albums.cursor + 1 < app.albums.search_results.len() {
+                app.albums.cursor += 1;
+            }
+        }
+        KeyCode::Enter => {
+            app.albums.searching = false;
+            app.albums.search_query.clear();
+            app.input_mode = InputMode::Normal;
+            if !app.albums.search_results.is_empty() {
+                app.albums.albums = app.albums.search_results.clone();
+                app.albums.search_results.clear();
+                app.albums.cursor = 0;
+            }
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.albums.search_query.push(ch);
+            spawn_albums_search(client.clone(), tx.clone(), app.albums.search_query.clone());
+        }
+        _ => {}
+    }
+}
+
+fn handle_command_input(
+    app: &mut App,
+    key: KeyEvent,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+) {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            app.cmd_input.clear();
+        }
+        KeyCode::Backspace => {
+            app.cmd_input.pop();
+        }
+        KeyCode::Enter => {
+            let cmd = app.cmd_input.trim().to_string();
+            app.cmd_input.clear();
+            app.input_mode = InputMode::Normal;
+            exec_command(app, &cmd, tx, client);
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cmd_input.push(ch);
+        }
+        _ => {}
+    }
+}
+
+fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return;
+    }
+    match parts[0] {
+        "q" | "quit" => app.should_quit = true,
+        "help" => app.help_active = true,
+        "rescan" => app.set_status("Rescanning library…"),
+        "speaker" | "room" => {
+            if parts.len() > 1 {
+                let needle = parts[1..].join(" ").to_lowercase();
+                if let Some(speaker) = app
+                    .speakers
+                    .iter()
+                    .find(|sp| sp.name.to_lowercase().contains(&needle))
+                {
+                    spawn_set_speaker(client.clone(), tx.clone(), speaker.uuid.clone());
+                } else {
+                    app.set_status(format!("Speaker not found: {}", parts[1..].join(" ")));
+                }
+            }
+        }
+        other => app.set_status(format!("Unknown command: {other}")),
+    }
+}
+
+fn sync_direct_art(
+    backend: &mut CrosstermBackend<Stdout>,
+    app: &App,
+    art_mode: ArtMode,
+    art_area: Option<Rect>,
+    state: &mut DirectArtState,
+) -> Result<()> {
+    if art_mode == ArtMode::None || app.active_tab != Tab::NowPlaying || app.help_active {
+        return clear_direct_art(backend, state);
+    }
+
+    let Some(area) = art_area.filter(|area| area.width > 0 && area.height > 0) else {
+        return clear_direct_art(backend, state);
+    };
+    let Some(image) = app.art_image_data.as_ref() else {
+        return clear_direct_art(backend, state);
+    };
+
+    let signature = format!(
+        "{}:{}:{}:{}:{}",
+        app.art_url, area.x, area.y, area.width, area.height
+    );
+    if state.active && state.signature == signature {
+        return Ok(());
+    }
+
+    let mut stdout = io::stdout();
+    if state.active {
+        if let Some(old) = state.area {
+            clear_art_area(&mut stdout, old, art_mode)?;
+        }
+    }
+
+    match art_mode {
+        ArtMode::Kitty => {
+            let (rgba, width, height) = kitty::resize_image_for_area(
+                &image.rgba,
+                image.width,
+                image.height,
+                area.width,
+                area.height,
+            );
+            let encoded = kitty::encode_kitty_payload(&rgba, width, height);
+            kitty::display_kitty_image(&mut stdout, &encoded, area)?;
+        }
+        ArtMode::Halfblock => render_halfblock(&mut stdout, area, image)?,
+        ArtMode::None => {}
+    }
+
+    state.active = true;
+    state.area = Some(area);
+    state.signature = signature;
+    Ok(())
+}
+
+fn clear_direct_art(
+    _backend: &mut CrosstermBackend<Stdout>,
+    state: &mut DirectArtState,
+) -> Result<()> {
+    if !state.active {
+        return Ok(());
+    }
+    if let Some(area) = state.area {
+        let mut stdout = io::stdout();
+        clear_art_area(&mut stdout, area, ArtMode::Kitty)?;
+    }
+    state.active = false;
+    state.area = None;
+    state.signature.clear();
+    Ok(())
+}
+
+fn clear_art_area(stdout: &mut Stdout, area: Rect, mode: ArtMode) -> Result<()> {
+    for y in 0..area.height {
+        execute!(stdout, MoveTo(area.x, area.y + y))?;
+        write!(stdout, "{}", " ".repeat(area.width as usize))?;
+    }
+    if mode == ArtMode::Kitty {
+        kitty::hide_kitty_image(stdout, area)?;
+    } else {
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+fn render_halfblock(stdout: &mut Stdout, area: Rect, image: &ArtImageData) -> Result<()> {
+    clear_art_area(stdout, area, ArtMode::Halfblock)?;
+    let rendered = kitty::render_halfblock(
+        &image.rgba,
+        image.width,
+        image.height,
+        area.width,
+        area.height,
+    );
+    let lines: Vec<&str> = rendered.lines().collect();
+    let top = area.y + area.height.saturating_sub(lines.len() as u16) / 2;
+    for (idx, line) in lines.iter().enumerate() {
+        execute!(stdout, MoveTo(area.x, top + idx as u16))?;
+        write!(stdout, "{line}")?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SimpleAction {
+    Stop,
+    Prev,
+    Next,
+    LineIn,
+}
+
+fn spawn_simple(client: DaemonClient, tx: Sender<AppEvent>, action: SimpleAction) {
+    spawn_task(tx, async move {
+        match action {
+            SimpleAction::Stop => client.stop().await?,
+            SimpleAction::Prev => client.prev().await?,
+            SimpleAction::Next => client.next().await?,
+            SimpleAction::LineIn => client.linein().await?,
+        }
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_volume(client: DaemonClient, tx: Sender<AppEvent>, delta: i32) {
+    spawn_task(tx, async move {
+        client.volume_relative(delta).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_set_speaker(client: DaemonClient, tx: Sender<AppEvent>, uuid: String) {
+    spawn_task(tx, async move {
+        client.set_active_speaker(&uuid).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_queue_play(client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
+    spawn_task(tx, async move {
+        client.queue_play(pos).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_queue_delete(client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
+    spawn_task(tx, async move {
+        client.queue_delete(pos).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_queue_clear(client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(tx, async move {
+        client.queue_clear().await?;
+        Ok(AppEvent::Status("Queue cleared".to_string()))
+    });
+}
+
+fn spawn_queue_reorder(client: DaemonClient, tx: Sender<AppEvent>, from: i32, to: i32) {
+    spawn_task(tx, async move {
+        client.queue_reorder(from, to).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
+fn spawn_queue_batch(client: DaemonClient, tx: Sender<AppEvent>, paths: Vec<String>, msg: String) {
+    spawn_task(tx, async move {
+        client.queue_batch(paths).await?;
+        Ok(AppEvent::Status(msg))
+    });
+}
+
+fn spawn_album_add(client: DaemonClient, tx: Sender<AppEvent>, id: String, line_in: bool) {
+    spawn_task(tx, async move {
+        let detail = client.album_detail(&id).await?;
+        let count = detail.tracks.len();
+        let paths: Vec<String> = detail.tracks.into_iter().map(|t| t.path).collect();
+        client.queue_batch(paths).await?;
+        let msg = if line_in {
+            format!("Added {count} items to queue. Press space to switch from line-in.")
+        } else {
+            format!("Added {count} items to queue")
+        };
+        Ok(AppEvent::Status(msg))
+    });
+}
+
+fn spawn_status_load(client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(tx, async move {
+        Ok(AppEvent::Connected(client.status().await?))
+    });
+}
+
+fn spawn_queue_load(client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(tx, async move {
+        Ok(AppEvent::QueueLoaded(client.queue().await?))
+    });
+}
+
+fn spawn_speakers_load(client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(tx, async move {
+        Ok(AppEvent::SpeakersLoaded(client.speakers().await?))
+    });
+}
+
+fn spawn_library_load(client: DaemonClient, tx: Sender<AppEvent>, path: String) {
+    spawn_task(tx, async move {
+        let entries = client.library(&path).await?;
+        Ok(AppEvent::LibraryLoaded { path, entries })
+    });
+}
+
+fn spawn_library_search(client: DaemonClient, tx: Sender<AppEvent>, query: String) {
+    spawn_task(tx, async move {
+        let results = client.library_search(&query).await?;
+        Ok(AppEvent::LibrarySearchLoaded(results))
+    });
+}
+
+fn spawn_albums_load(client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(tx, async move {
+        Ok(AppEvent::AlbumsLoaded(client.albums().await?))
+    });
+}
+
+fn spawn_albums_search(client: DaemonClient, tx: Sender<AppEvent>, query: String) {
+    spawn_task(tx, async move {
+        let albums = client.albums_search(&query).await?;
+        Ok(AppEvent::AlbumsSearchLoaded(albums))
+    });
+}
+
+fn spawn_album_detail_load(client: DaemonClient, tx: Sender<AppEvent>, id: String) {
+    spawn_task(tx, async move {
+        let detail = client.album_detail(&id).await?;
+        Ok(AppEvent::AlbumDetailLoaded { id, detail })
+    });
+}
+
+fn spawn_art_load(client: DaemonClient, tx: Sender<AppEvent>, url: String) {
+    spawn_task(tx, async move {
+        let bytes = client.fetch_art_bytes(&url).await?;
+        let reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+        let image = reader.decode()?.to_rgba8();
+        Ok(AppEvent::ArtLoaded {
+            url,
+            image: Some(ArtImageData {
+                rgba: image.clone().into_raw(),
+                width: image.width(),
+                height: image.height(),
+            }),
+        })
+    });
+}
+
+fn spawn_sse(client: DaemonClient, tx: Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            let _ = tx.send(AppEvent::Error("Failed to start SSE runtime".to_string()));
+            return;
+        };
+        let (evt_tx, evt_rx) = mpsc::channel();
+        let bridge_tx = tx.clone();
+        std::thread::spawn(move || {
+            while let Ok(evt) = evt_rx.recv() {
+                if bridge_tx.send(AppEvent::Sse(evt)).is_err() {
+                    break;
+                }
+            }
+        });
+        if let Err(err) = runtime.block_on(client.stream_events(evt_tx)) {
+            let _ = tx.send(AppEvent::Error(format!("SSE error: {err}")));
+        }
+    });
+}
+
+fn spawn_task<F>(tx: Sender<AppEvent>, future: F)
+where
+    F: std::future::Future<Output = Result<AppEvent>> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let Ok(runtime) = runtime else {
+            let _ = tx.send(AppEvent::Error("Failed to start async runtime".to_string()));
+            return;
+        };
+        let event = match runtime.block_on(future) {
+            Ok(event) => event,
+            Err(err) => AppEvent::Error(err.to_string()),
+        };
+        let _ = tx.send(event);
+    });
+}
+
+fn spawn_tick_thread(tx: Sender<AppEvent>, delay: Duration) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(delay);
+        if tx.send(AppEvent::Tick).is_err() {
+            break;
+        }
+    });
+}
+
+fn spawn_input_thread(tx: Sender<AppEvent>) {
+    std::thread::spawn(move || loop {
+        match event::poll(Duration::from_millis(100)) {
+            Ok(true) => match event::read() {
+                Ok(CEvent::Key(key)) => {
+                    if tx.send(AppEvent::Key(key)).is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    let _ = tx.send(AppEvent::Error(format!("input error: {err}")));
+                    break;
+                }
+            },
+            Ok(false) => {}
+            Err(err) => {
+                let _ = tx.send(AppEvent::Error(format!("poll error: {err}")));
+                break;
+            }
+        }
+    });
+}
+
+fn detect_art_mode(mode: ArtCliMode) -> ArtMode {
+    match mode {
+        ArtCliMode::Kitty => ArtMode::Kitty,
+        ArtCliMode::Halfblock => ArtMode::Halfblock,
+        ArtCliMode::None => ArtMode::None,
+        ArtCliMode::Auto => {
+            let term = std::env::var("TERM").unwrap_or_default();
+            if std::env::var_os("KITTY_WINDOW_ID").is_some()
+                || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+                || term.contains("kitty")
+            {
+                ArtMode::Kitty
+            } else {
+                ArtMode::Halfblock
+            }
+        }
+    }
+}
+
+fn page_size() -> usize {
+    let (_, rows) = terminal::size().unwrap_or((120, 40));
+    rows.saturating_sub(8) as usize
+}
+
+fn queue_position(app: &App) -> Option<i32> {
+    app.queue
+        .items
+        .get(app.queue.cursor)
+        .map(|item| item.position)
+}
+
+fn parent_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".to_string();
+    }
+    match trimmed.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+fn visible_albums(app: &App) -> &[client::Album] {
+    if app.albums.searching && !app.albums.search_results.is_empty() {
+        &app.albums.search_results
+    } else {
+        &app.albums.albums
+    }
+}
+
+fn current_album(app: &App) -> Option<&client::Album> {
+    visible_albums(app).get(app.albums.cursor)
+}
