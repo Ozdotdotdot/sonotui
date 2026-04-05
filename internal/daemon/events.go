@@ -26,7 +26,7 @@ func NewBroadcaster() *Broadcaster {
 
 // Subscribe registers a new SSE client channel and returns it.
 func (b *Broadcaster) Subscribe() chan SSEEvent {
-	ch := make(chan SSEEvent, 32)
+	ch := make(chan SSEEvent, 128)
 	b.mu.Lock()
 	b.clients[ch] = struct{}{}
 	b.mu.Unlock()
@@ -53,7 +53,7 @@ func (b *Broadcaster) Send(payload any) {
 		select {
 		case ch <- evt:
 		default:
-			// Slow client — drop event.
+			log.Printf("sse: slow client, dropping event")
 		}
 	}
 	b.mu.Unlock()

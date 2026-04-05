@@ -58,6 +58,10 @@ type State struct {
 	Duration int
 	Playing  bool
 
+	// TrackGen is incremented on every track URI change, used to detect
+	// stale async goroutines that should not overwrite newer state.
+	TrackGen uint64
+
 	// Queue (mirror of Sonos Q:0, refreshed on queue-change GENA events)
 	Queue []QueueItem
 

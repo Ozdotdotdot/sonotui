@@ -1235,7 +1235,13 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 		if state.Duration > 0 {
 			sm.state.Duration = state.Duration
 		}
+		// Increment generation counter when the track URI changes.
+		if state.CurrentTrackURI != prevURI {
+			sm.state.TrackGen++
+		}
 	}
+	// Capture generation while lock is still held, before spawning goroutine.
+	currentGen := sm.state.TrackGen
 	sm.state.Unlock()
 
 	// Broadcast events.
@@ -1269,12 +1275,17 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 	}
 
 	if needsSync && speakerIP != "" {
-		go func() {
+		go func(expectedGen uint64, expectedURI string) {
 			pos, err := sonosGetPositionInfo(speakerIP)
 			if err != nil {
 				return
 			}
 			sm.state.Lock()
+			// Abort if the track has changed since we started — our data is stale.
+			if sm.state.TrackGen != expectedGen {
+				sm.state.Unlock()
+				return
+			}
 			sm.state.Elapsed = pos.Elapsed
 			if pos.Duration > 0 {
 				sm.state.Duration = pos.Duration
@@ -1282,7 +1293,7 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 			if pos.Track != (TrackInfo{}) {
 				pos.Track = sm.enrichTrackInfo(pos.Track)
 				if pos.Track.URI == "" {
-					pos.Track.URI = state.CurrentTrackURI
+					pos.Track.URI = expectedURI
 				}
 				sm.state.Track = pos.Track
 			}
@@ -1291,7 +1302,7 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 				sm.events.Send(evtTrack(pos.Track))
 			}
 			sm.events.Send(evtPosition(pos.Elapsed, pos.Duration))
-		}()
+		}(currentGen, state.CurrentTrackURI)
 	}
 
 	// Queue may have changed on track changes.

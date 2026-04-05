@@ -7,8 +7,9 @@ mod ui;
 use std::{
     io::{self, Stdout, Write},
     sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
+    time::{Duration, Instant},
 };
+use tokio::runtime::Handle;
 
 use anyhow::{Context, Result};
 use app::{App, ArtImageData, InputMode, Tab};
@@ -59,7 +60,9 @@ enum ArtMode {
 enum AppEvent {
     Tick,
     Key(KeyEvent),
+    Resize(u16, u16),
     Connected(client::StatusResponse),
+    StatusRefresh(client::StatusResponse),
     QueueLoaded(Vec<client::QueueItem>),
     QueueCleared,
     SpeakersLoaded(Vec<client::SpeakerInfo>),
@@ -115,6 +118,8 @@ struct DirectArtState {
     signature: String,
 }
 
+const STATUS_POLL_INTERVAL: u32 = 150; // ~30s at 200ms tick
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let client = DaemonClient::new(&args.host, args.port);
@@ -122,9 +127,16 @@ fn main() -> Result<()> {
     let mut app = App::new(client.clone());
     let (tx, rx) = mpsc::channel();
 
-    spawn_tick_thread(tx.clone(), Duration::from_millis(250));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("create tokio runtime")?;
+    let handle = runtime.handle().clone();
+
+    spawn_tick_thread(tx.clone(), Duration::from_millis(200));
     spawn_input_thread(tx.clone());
-    spawn_status_load(client.clone(), tx.clone());
+    spawn_status_load(&handle, client.clone(), tx.clone());
 
     let mut term = TerminalGuard::new()?;
     let mut art_state = DirectArtState::default();
@@ -136,6 +148,7 @@ fn main() -> Result<()> {
         client,
         art_mode,
         &mut art_state,
+        &handle,
     )
 }
 
@@ -147,173 +160,109 @@ fn run_loop(
     client: DaemonClient,
     art_mode: ArtMode,
     art_state: &mut DirectArtState,
+    handle: &Handle,
 ) -> Result<()> {
+    let mut render_wanted = true;
+    let frame_duration = Duration::from_secs_f64(1.0 / 30.0);
+    let mut last_render = Instant::now() - Duration::from_secs(1);
+    let mut resize_pending: Option<Instant> = None;
+    let mut tick_count: u32 = 0;
+    const RESIZE_DEBOUNCE: Duration = Duration::from_millis(150);
+    // STATUS_POLL_INTERVAL defined at module level
+
     loop {
-        let should_clear_direct_art = art_state.active
-            && (art_mode == ArtMode::None
-                || app.active_tab != Tab::NowPlaying
-                || app.help_active
-                || app.art_image_data.is_none());
-        if should_clear_direct_art {
-            clear_direct_art(terminal.backend_mut(), art_state)?;
-            terminal.clear()?;
+        // Handle debounced resize
+        if let Some(when) = resize_pending {
+            if when.elapsed() >= RESIZE_DEBOUNCE {
+                resize_pending = None;
+                clear_direct_art(terminal.backend_mut(), art_state)?;
+                terminal.clear()?;
+                render_wanted = true;
+            }
         }
 
-        let mut art_area = None;
-        terminal.draw(|f| {
-            let layout = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Length(2),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(f.area());
-
-            ui::common::render_header(f, layout[0], app);
-            ui::render_tab_bar(f, layout[1], app);
-
-            if !app.connected {
-                ui::common::render_connecting(f, layout[2], app);
-            } else {
-                match app.active_tab {
-                    Tab::NowPlaying => {
-                        ui::now_playing::render(f, layout[2], app, art_mode == ArtMode::None);
-                        art_area = Some(ui::now_playing::art_area(layout[2], app));
-                    }
-                    Tab::Queue => ui::queue::render(f, layout[2], app),
-                    Tab::Library => ui::library::render(f, layout[2], app),
-                    Tab::Albums => ui::albums::render(f, layout[2], app),
-                }
+        // Render when needed and frame budget allows
+        if render_wanted && last_render.elapsed() >= frame_duration {
+            let should_clear_direct_art = art_state.active
+                && (art_mode == ArtMode::None
+                    || app.active_tab != Tab::NowPlaying
+                    || app.help_active
+                    || app.art_image_data.is_none());
+            if should_clear_direct_art {
+                clear_direct_art(terminal.backend_mut(), art_state)?;
+                terminal.clear()?;
             }
 
-            ui::render_command_line(f, layout[3], app);
-            ui::render_help_overlay(f, f.area(), app);
-        })?;
+            let mut art_area = None;
+            terminal.draw(|f| {
+                let layout = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .split(f.area());
 
-        sync_direct_art(terminal.backend_mut(), app, art_mode, art_area, art_state)?;
+                ui::common::render_header(f, layout[0], app);
+                ui::render_tab_bar(f, layout[1], app);
 
-        match rx.recv().context("event channel closed")? {
-            AppEvent::Tick => app.clear_expired_status(),
-            AppEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                handle_key(app, key, &tx, &client);
-            }
-            AppEvent::Key(_) => {}
-            AppEvent::Connected(status) => {
-                app.apply_status(status);
-                app.albums.scan_status = if app.library_ready {
-                    "done".to_string()
+                if !app.connected {
+                    ui::common::render_connecting(f, layout[2], app);
                 } else {
-                    "scanning".to_string()
-                };
-                spawn_sse(client.clone(), tx.clone());
-                spawn_queue_load(client.clone(), tx.clone());
-                spawn_speakers_load(client.clone(), tx.clone());
-                spawn_library_column_load(
-                    client.clone(),
-                    tx.clone(),
-                    0,
-                    "/".to_string(),
-                    "Library".to_string(),
-                );
-                if app.library_ready {
-                    spawn_albums_load(client.clone(), tx.clone());
-                }
-                if !app.art_url.is_empty() {
-                    spawn_art_load(client.clone(), tx.clone(), app.art_url.clone());
-                }
-            }
-            AppEvent::QueueLoaded(items) => {
-                app.queue.items = items;
-                if app.queue.cursor >= app.queue.items.len() {
-                    app.queue.cursor = app.queue.items.len().saturating_sub(1);
-                }
-            }
-            AppEvent::QueueCleared => {
-                app.queue.items.clear();
-                app.queue.cursor = 0;
-                app.queue.dd_pending = false;
-                app.queue.confirm_clear = false;
-                app.set_status("Queue cleared");
-            }
-            AppEvent::SpeakersLoaded(speakers) => {
-                app.speakers = speakers;
-            }
-            AppEvent::LibraryColumnLoaded {
-                depth,
-                path,
-                title,
-                entries,
-            } => {
-                if depth == 0 {
-                    app.library.current_path = path.clone();
-                    app.library.entries = entries.clone();
-                    app.library.cursor = 0;
-                    app.library.columns.clear();
-                    app.library.columns.push(app::LibraryColumn {
-                        title,
-                        entries,
-                        cursor: 0,
-                    });
-                    app.library.active_column = 0;
-                    queue_library_preview(&tx, &client, app, 0);
-                } else if depth <= 2 && library_preview_matches(app, depth, &path) {
-                    app.library.columns.truncate(depth);
-                    app.library.columns.push(app::LibraryColumn {
-                        title,
-                        entries,
-                        cursor: 0,
-                    });
-                    if app.library.active_column > app.library.columns.len().saturating_sub(1) {
-                        app.library.active_column = app.library.columns.len().saturating_sub(1);
-                    }
-                    if depth < 2 {
-                        queue_library_preview(&tx, &client, app, depth);
+                    match app.active_tab {
+                        Tab::NowPlaying => {
+                            ui::now_playing::render(f, layout[2], app, art_mode == ArtMode::None);
+                            art_area = Some(ui::now_playing::art_area(layout[2], app));
+                        }
+                        Tab::Queue => ui::queue::render(f, layout[2], app),
+                        Tab::Library => ui::library::render(f, layout[2], app),
+                        Tab::Albums => ui::albums::render(f, layout[2], app),
                     }
                 }
-            }
-            AppEvent::LibrarySearchLoaded(results) => {
-                app.library.search_results = results;
-                app.library.search_cursor = 0;
-            }
-            AppEvent::AlbumsLoaded(albums) => {
-                let mut albums = albums;
-                albums.sort_by(|a, b| {
-                    a.title
-                        .to_lowercase()
-                        .cmp(&b.title.to_lowercase())
-                        .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
-                });
-                app.albums.albums = albums;
-                if app.albums.cursor >= app.albums.albums.len() {
-                    app.albums.cursor = app.albums.albums.len().saturating_sub(1);
-                }
-                queue_album_preview(&tx, &client, app);
-            }
-            AppEvent::AlbumsSearchLoaded(albums) => {
-                let mut albums = albums;
-                albums.sort_by(|a, b| {
-                    a.title
-                        .to_lowercase()
-                        .cmp(&b.title.to_lowercase())
-                        .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
-                });
-                app.albums.search_results = albums;
-                app.albums.cursor = 0;
-                queue_album_preview(&tx, &client, app);
-            }
-            AppEvent::AlbumDetailLoaded { id, detail } => {
-                if app.albums.preview_id == id {
-                    app.albums.expand_tracks = detail.tracks;
+
+                ui::render_command_line(f, layout[3], app);
+                ui::render_help_overlay(f, f.area(), app);
+            })?;
+
+            sync_direct_art(terminal.backend_mut(), app, art_mode, art_area, art_state)?;
+            render_wanted = false;
+            last_render = Instant::now();
+        }
+
+        // Smart blocking: short timeout if render pending, otherwise block indefinitely
+        let event = if render_wanted || resize_pending.is_some() {
+            let timeout = if render_wanted {
+                frame_duration.saturating_sub(last_render.elapsed())
+            } else {
+                RESIZE_DEBOUNCE.saturating_sub(
+                    resize_pending.map(|w| w.elapsed()).unwrap_or_default(),
+                )
+            };
+            match rx.recv_timeout(timeout) {
+                Ok(evt) => Some(evt),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow::anyhow!("event channel closed"));
                 }
             }
-            AppEvent::ArtLoaded { url, image } => {
-                if url == app.art_url {
-                    app.art_image_data = image;
-                }
-            }
-            AppEvent::Sse(evt) => handle_sse(app, evt, &tx, &client),
-            AppEvent::Status(msg) => app.set_status(msg),
-            AppEvent::Error(err) => app.set_status(err),
+        } else {
+            Some(rx.recv().context("event channel closed")?)
+        };
+
+        // Process event
+        if let Some(event) = event {
+            process_event(
+                app, event, &tx, &client, handle, art_mode,
+                &mut render_wanted, &mut resize_pending, &mut tick_count,
+            );
+        }
+
+        // Drain queued events to coalesce bursts
+        while let Ok(event) = rx.try_recv() {
+            process_event(
+                app, event, &tx, &client, handle, art_mode,
+                &mut render_wanted, &mut resize_pending, &mut tick_count,
+            );
         }
 
         if app.should_quit {
@@ -325,7 +274,198 @@ fn run_loop(
     Ok(())
 }
 
-fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+#[allow(clippy::too_many_arguments)]
+fn process_event(
+    app: &mut App,
+    event: AppEvent,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+    handle: &Handle,
+    _art_mode: ArtMode,
+    render_wanted: &mut bool,
+    resize_pending: &mut Option<Instant>,
+    tick_count: &mut u32,
+) {
+    match event {
+        AppEvent::Tick => {
+            let had_status = app.status_expiry.is_some();
+            app.clear_expired_status();
+            if had_status && app.status_expiry.is_none() {
+                *render_wanted = true;
+            }
+            if app.transport == "PLAYING" {
+                *render_wanted = true;
+            }
+            *tick_count += 1;
+            if app.connected && *tick_count % STATUS_POLL_INTERVAL == 0 {
+                let c = client.clone();
+                let t = tx.clone();
+                handle.spawn(async move {
+                    if let Ok(status) = c.status().await {
+                        let _ = t.send(AppEvent::StatusRefresh(status));
+                    }
+                });
+            }
+        }
+        AppEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            handle_key(app, key, tx, client, handle);
+            *render_wanted = true;
+        }
+        AppEvent::Key(_) => {}
+        AppEvent::Resize(_w, _h) => {
+            *resize_pending = Some(Instant::now());
+        }
+        AppEvent::Connected(status) => {
+            app.apply_status(status);
+            app.albums.scan_status = if app.library_ready {
+                "done".to_string()
+            } else {
+                "scanning".to_string()
+            };
+            spawn_sse(handle, client.clone(), tx.clone());
+            spawn_queue_load(handle, client.clone(), tx.clone());
+            spawn_speakers_load(handle, client.clone(), tx.clone());
+            spawn_library_column_load(
+                handle,
+                client.clone(),
+                tx.clone(),
+                0,
+                "/".to_string(),
+                "Library".to_string(),
+            );
+            if app.library_ready {
+                spawn_albums_load(handle, client.clone(), tx.clone());
+            }
+            if !app.art_url.is_empty() {
+                spawn_art_load(handle, client.clone(), tx.clone(), app.art_url.clone());
+            }
+            *render_wanted = true;
+        }
+        AppEvent::StatusRefresh(status) => {
+            if status.track.uri != app.track.uri || status.transport != app.transport {
+                let art_changed = status.track.art_url != app.art_url;
+                app.apply_status(status);
+                if art_changed && !app.art_url.is_empty() {
+                    app.art_image_data = None;
+                    spawn_art_load(handle, client.clone(), tx.clone(), app.art_url.clone());
+                }
+                *render_wanted = true;
+            }
+        }
+        AppEvent::QueueLoaded(items) => {
+            app.queue.items = items;
+            if app.queue.cursor >= app.queue.items.len() {
+                app.queue.cursor = app.queue.items.len().saturating_sub(1);
+            }
+            *render_wanted = true;
+        }
+        AppEvent::QueueCleared => {
+            app.queue.items.clear();
+            app.queue.cursor = 0;
+            app.queue.dd_pending = false;
+            app.queue.confirm_clear = false;
+            app.set_status("Queue cleared");
+            *render_wanted = true;
+        }
+        AppEvent::SpeakersLoaded(speakers) => {
+            app.speakers = speakers;
+            *render_wanted = true;
+        }
+        AppEvent::LibraryColumnLoaded {
+            depth,
+            path,
+            title,
+            entries,
+        } => {
+            if depth == 0 {
+                app.library.current_path = path.clone();
+                app.library.entries = entries.clone();
+                app.library.cursor = 0;
+                app.library.columns.clear();
+                app.library.columns.push(app::LibraryColumn {
+                    title,
+                    entries,
+                    cursor: 0,
+                });
+                app.library.active_column = 0;
+                queue_library_preview(tx, client, app, 0, handle);
+            } else if depth <= 2 && library_preview_matches(app, depth, &path) {
+                app.library.columns.truncate(depth);
+                app.library.columns.push(app::LibraryColumn {
+                    title,
+                    entries,
+                    cursor: 0,
+                });
+                if app.library.active_column > app.library.columns.len().saturating_sub(1) {
+                    app.library.active_column = app.library.columns.len().saturating_sub(1);
+                }
+                if depth < 2 {
+                    queue_library_preview(tx, client, app, depth, handle);
+                }
+            }
+            *render_wanted = true;
+        }
+        AppEvent::LibrarySearchLoaded(results) => {
+            app.library.search_results = results;
+            app.library.search_cursor = 0;
+            *render_wanted = true;
+        }
+        AppEvent::AlbumsLoaded(albums) => {
+            let mut albums = albums;
+            albums.sort_by(|a, b| {
+                a.title
+                    .to_lowercase()
+                    .cmp(&b.title.to_lowercase())
+                    .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+            });
+            app.albums.albums = albums;
+            if app.albums.cursor >= app.albums.albums.len() {
+                app.albums.cursor = app.albums.albums.len().saturating_sub(1);
+            }
+            queue_album_preview(tx, client, app, handle);
+            *render_wanted = true;
+        }
+        AppEvent::AlbumsSearchLoaded(albums) => {
+            let mut albums = albums;
+            albums.sort_by(|a, b| {
+                a.title
+                    .to_lowercase()
+                    .cmp(&b.title.to_lowercase())
+                    .then(a.artist.to_lowercase().cmp(&b.artist.to_lowercase()))
+            });
+            app.albums.search_results = albums;
+            app.albums.cursor = 0;
+            queue_album_preview(tx, client, app, handle);
+            *render_wanted = true;
+        }
+        AppEvent::AlbumDetailLoaded { id, detail } => {
+            if app.albums.preview_id == id {
+                app.albums.expand_tracks = detail.tracks;
+                *render_wanted = true;
+            }
+        }
+        AppEvent::ArtLoaded { url, image } => {
+            if url == app.art_url {
+                app.art_image_data = image;
+                *render_wanted = true;
+            }
+        }
+        AppEvent::Sse(evt) => {
+            handle_sse(app, evt, tx, client, handle);
+            *render_wanted = true;
+        }
+        AppEvent::Status(msg) => {
+            app.set_status(msg);
+            *render_wanted = true;
+        }
+        AppEvent::Error(err) => {
+            app.set_status(err);
+            *render_wanted = true;
+        }
+    }
+}
+
+fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     match evt.kind.as_str() {
         "transport" => {
             if let Some(state) = evt.payload.get("state").and_then(|v| v.as_str()) {
@@ -355,7 +495,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                     app.track.art_url = url.to_string();
                     app.art_image_data = None;
                     if !url.is_empty() {
-                        spawn_art_load(client.clone(), tx.clone(), url.to_string());
+                        spawn_art_load(handle, client.clone(), tx.clone(), url.to_string());
                     }
                 }
             }
@@ -378,7 +518,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                 app.is_line_in = active;
             }
         }
-        "queue_changed" => spawn_queue_load(client.clone(), tx.clone()),
+        "queue_changed" => spawn_queue_load(handle, client.clone(), tx.clone()),
         "speaker" => {
             let name = evt
                 .payload
@@ -395,7 +535,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                 uuid: uuid.to_string(),
                 ip: String::new(),
             });
-            spawn_speakers_load(client.clone(), tx.clone());
+            spawn_speakers_load(handle, client.clone(), tx.clone());
         }
         "library_scan" => {
             if let Some(status) = evt.payload.get("status").and_then(|v| v.as_str()) {
@@ -406,7 +546,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                 app.albums.scan_progress = progress;
             }
             if app.library_ready && app.albums.albums.is_empty() {
-                spawn_albums_load(client.clone(), tx.clone());
+                spawn_albums_load(handle, client.clone(), tx.clone());
             }
         }
         "error" => {
@@ -418,7 +558,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
     }
 }
 
-fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     if app.help_active {
         if matches!(
             key.code,
@@ -430,14 +570,14 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
     }
 
     if app.input_mode == InputMode::Command {
-        handle_command_input(app, key, tx, client);
+        handle_command_input(app, key, tx, client, handle);
         return;
     }
 
     if app.input_mode == InputMode::Search {
         match app.active_tab {
-            Tab::Library => handle_library_search(app, key, tx, client),
-            Tab::Albums => handle_album_search(app, key, tx, client),
+            Tab::Library => handle_library_search(app, key, tx, client, handle),
+            Tab::Albums => handle_album_search(app, key, tx, client, handle),
             _ => {}
         }
         return;
@@ -483,7 +623,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             app.active_tab = Tab::Albums;
             app.g_pending = false;
             if app.library_ready && app.albums.albums.is_empty() {
-                spawn_albums_load(client.clone(), tx.clone());
+                spawn_albums_load(handle, client.clone(), tx.clone());
             }
             return;
         }
@@ -528,7 +668,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             let line_in = app.is_line_in;
             let queue_len = app.queue.items.len();
             let client = client.clone();
-            spawn_task(tx.clone(), async move {
+            spawn_task(handle, tx.clone(), async move {
                 if transport == "PLAYING" && !line_in {
                     client.pause().await?;
                 } else if line_in && queue_len > 0 {
@@ -539,44 +679,44 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
                 Ok(AppEvent::Status(String::new()))
             });
         }
-        KeyCode::Char('s') => spawn_simple(client.clone(), tx.clone(), SimpleAction::Stop),
+        KeyCode::Char('s') => spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::Stop),
         KeyCode::Char('<') | KeyCode::Char(',') => {
-            spawn_simple(client.clone(), tx.clone(), SimpleAction::Prev)
+            spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::Prev)
         }
         KeyCode::Char('>') | KeyCode::Char('.') => {
-            spawn_simple(client.clone(), tx.clone(), SimpleAction::Next)
+            spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::Next)
         }
-        KeyCode::Char('l') => spawn_simple(client.clone(), tx.clone(), SimpleAction::LineIn),
+        KeyCode::Char('l') => spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::LineIn),
         KeyCode::Tab => {
             if let Some(uuid) = app.cycle_speaker() {
-                spawn_set_speaker(client.clone(), tx.clone(), uuid);
+                spawn_set_speaker(handle, client.clone(), tx.clone(), uuid);
             }
         }
         _ => match app.active_tab {
-            Tab::NowPlaying => handle_now_playing_key(key, tx, client),
-            Tab::Queue => handle_queue_key(app, key, tx, client),
-            Tab::Library => handle_library_key(app, key, tx, client),
-            Tab::Albums => handle_album_key(app, key, tx, client),
+            Tab::NowPlaying => handle_now_playing_key(key, tx, client, handle),
+            Tab::Queue => handle_queue_key(app, key, tx, client, handle),
+            Tab::Library => handle_library_key(app, key, tx, client, handle),
+            Tab::Albums => handle_album_key(app, key, tx, client, handle),
         },
     }
 }
 
-fn handle_now_playing_key(key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_now_playing_key(key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     match key.code {
-        KeyCode::Char('k') | KeyCode::Up => spawn_volume(client.clone(), tx.clone(), 5),
-        KeyCode::Char('j') | KeyCode::Down => spawn_volume(client.clone(), tx.clone(), -5),
-        KeyCode::Char('K') => spawn_volume(client.clone(), tx.clone(), 1),
-        KeyCode::Char('J') => spawn_volume(client.clone(), tx.clone(), -1),
+        KeyCode::Char('k') | KeyCode::Up => spawn_volume(handle, client.clone(), tx.clone(), 5),
+        KeyCode::Char('j') | KeyCode::Down => spawn_volume(handle, client.clone(), tx.clone(), -5),
+        KeyCode::Char('K') => spawn_volume(handle, client.clone(), tx.clone(), 1),
+        KeyCode::Char('J') => spawn_volume(handle, client.clone(), tx.clone(), -1),
         _ => {}
     }
 }
 
-fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     if app.queue.confirm_clear {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 app.queue.confirm_clear = false;
-                spawn_queue_clear(client.clone(), tx.clone());
+                spawn_queue_clear(handle, client.clone(), tx.clone());
             }
             KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
                 app.queue.confirm_clear = false;
@@ -614,14 +754,14 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
         }
         KeyCode::Char('p') => {
             if let Some(pos) = queue_position(app) {
-                spawn_queue_play(client.clone(), tx.clone(), pos);
+                spawn_queue_play(handle, client.clone(), tx.clone(), pos);
             }
         }
         KeyCode::Char('d') => {
             if app.queue.dd_pending {
                 app.queue.dd_pending = false;
                 if let Some(pos) = queue_position(app) {
-                    spawn_queue_delete(client.clone(), tx.clone(), pos);
+                    spawn_queue_delete(handle, client.clone(), tx.clone(), pos);
                 }
             } else {
                 app.queue.dd_pending = true;
@@ -634,7 +774,7 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
                     if app.queue.cursor + 1 < app.queue.items.len() {
                         app.queue.cursor += 1;
                     }
-                    spawn_queue_reorder(client.clone(), tx.clone(), pos, pos + 1);
+                    spawn_queue_reorder(handle, client.clone(), tx.clone(), pos, pos + 1);
                 }
             }
         }
@@ -642,7 +782,7 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
             if let Some(pos) = queue_position(app) {
                 if pos > 1 {
                     app.queue.cursor = app.queue.cursor.saturating_sub(1);
-                    spawn_queue_reorder(client.clone(), tx.clone(), pos, pos - 1);
+                    spawn_queue_reorder(handle, client.clone(), tx.clone(), pos, pos - 1);
                 }
             }
         }
@@ -650,7 +790,7 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
     }
 }
 
-fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     if app.library.searching {
         match key.code {
             KeyCode::Esc => {
@@ -686,6 +826,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                     app.input_mode = InputMode::Normal;
                     if entry.entry_type == "dir" {
                         spawn_library_column_load(
+                            handle,
                             client.clone(),
                             tx.clone(),
                             0,
@@ -699,6 +840,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                             .map(|(parent, _)| format!("/{parent}"))
                             .unwrap_or_else(|| "/".to_string());
                         spawn_library_column_load(
+                            handle,
                             client.clone(),
                             tx.clone(),
                             0,
@@ -714,15 +856,15 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
     }
 
     match key.code {
-        KeyCode::Char('k') | KeyCode::Up => move_library_cursor(app, tx, client, -1),
+        KeyCode::Char('k') | KeyCode::Up => move_library_cursor(app, tx, client, -1, handle),
         KeyCode::Char('j') | KeyCode::Down => {
-            move_library_cursor(app, tx, client, 1);
+            move_library_cursor(app, tx, client, 1, handle);
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            move_library_cursor(app, tx, client, -(page_size() as isize / 2));
+            move_library_cursor(app, tx, client, -(page_size() as isize / 2), handle);
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            move_library_cursor(app, tx, client, page_size() as isize / 2);
+            move_library_cursor(app, tx, client, page_size() as isize / 2, handle);
         }
         KeyCode::Char('G') => {
             set_library_cursor(
@@ -731,6 +873,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                 client,
                 app.library.active_column,
                 library_column_len(app, app.library.active_column).saturating_sub(1),
+                handle,
             );
         }
         KeyCode::Left | KeyCode::Backspace => {
@@ -740,14 +883,15 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
             }
         }
         KeyCode::Right => {
-            library_enter_column(app, tx, client);
+            library_enter_column(app, tx, client, handle);
         }
         KeyCode::Enter => {
             if let Some(entry) = library_current_entry(app).cloned() {
                 if entry.entry_type == "dir" {
-                    library_enter_column(app, tx, client);
+                    library_enter_column(app, tx, client, handle);
                 } else {
                     spawn_queue_batch(
+                        handle,
                         client.clone(),
                         tx.clone(),
                         vec![entry.path],
@@ -768,6 +912,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                     "Added selection to queue"
                 };
                 spawn_queue_batch(
+                    handle,
                     client.clone(),
                     tx.clone(),
                     vec![entry.path],
@@ -788,7 +933,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                 } else {
                     format!("Added {count} items to queue")
                 };
-                spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
+                spawn_queue_batch(handle, client.clone(), tx.clone(), paths, msg);
             }
         }
         KeyCode::Char('/') => {
@@ -802,7 +947,7 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
     }
 }
 
-fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     if !app.library_ready {
         return;
     }
@@ -843,7 +988,7 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
                     app.albums.search_query.clear();
                     app.albums.search_results.clear();
                     app.input_mode = InputMode::Normal;
-                    queue_album_preview(tx, client, app);
+                    queue_album_preview(tx, client, app, handle);
                 }
             }
             _ => {}
@@ -852,15 +997,15 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
     }
 
     match key.code {
-        KeyCode::Char('k') | KeyCode::Up => move_album_cursor(app, tx, client, -1),
+        KeyCode::Char('k') | KeyCode::Up => move_album_cursor(app, tx, client, -1, handle),
         KeyCode::Char('j') | KeyCode::Down => {
-            move_album_cursor(app, tx, client, 1);
+            move_album_cursor(app, tx, client, 1, handle);
         }
-        KeyCode::Char('K') => move_album_cursor(app, tx, client, -1),
-        KeyCode::Char('J') => move_album_cursor(app, tx, client, 1),
+        KeyCode::Char('K') => move_album_cursor(app, tx, client, -1, handle),
+        KeyCode::Char('J') => move_album_cursor(app, tx, client, 1, handle),
         KeyCode::Char('G') => {
             app.albums.cursor = visible_albums(app).len().saturating_sub(1);
-            queue_album_preview(tx, client, app);
+            queue_album_preview(tx, client, app, handle);
         }
         KeyCode::Esc => {}
         KeyCode::Enter => {
@@ -877,12 +1022,12 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
                 } else {
                     format!("Added {count} items to queue")
                 };
-                spawn_queue_batch(client.clone(), tx.clone(), paths, msg);
+                spawn_queue_batch(handle, client.clone(), tx.clone(), paths, msg);
             }
         }
         KeyCode::Char('a') => {
             if let Some(album) = current_album(app).cloned() {
-                spawn_album_add(client.clone(), tx.clone(), album.id, app.is_line_in);
+                spawn_album_add(handle, client.clone(), tx.clone(), album.id, app.is_line_in);
             }
         }
         KeyCode::Char('/') => {
@@ -901,6 +1046,7 @@ fn handle_library_search(
     key: KeyEvent,
     tx: &Sender<AppEvent>,
     client: &DaemonClient,
+    handle: &Handle,
 ) {
     match key.code {
         KeyCode::Esc => {
@@ -911,7 +1057,7 @@ fn handle_library_search(
             if app.library.search_query.is_empty() {
                 app.library.search_results.clear();
             } else {
-                spawn_library_search(client.clone(), tx.clone(), app.library.search_query.clone());
+                spawn_library_search(handle, client.clone(), tx.clone(), app.library.search_query.clone());
             }
         }
         KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -935,13 +1081,13 @@ fn handle_library_search(
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.library.search_query.push(ch);
-            spawn_library_search(client.clone(), tx.clone(), app.library.search_query.clone());
+            spawn_library_search(handle, client.clone(), tx.clone(), app.library.search_query.clone());
         }
         _ => {}
     }
 }
 
-fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
@@ -951,7 +1097,7 @@ fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clie
             if app.albums.search_query.is_empty() {
                 app.albums.search_results.clear();
             } else {
-                spawn_albums_search(client.clone(), tx.clone(), app.albums.search_query.clone());
+                spawn_albums_search(handle, client.clone(), tx.clone(), app.albums.search_query.clone());
             }
         }
         KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -973,7 +1119,7 @@ fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clie
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.albums.search_query.push(ch);
-            spawn_albums_search(client.clone(), tx.clone(), app.albums.search_query.clone());
+            spawn_albums_search(handle, client.clone(), tx.clone(), app.albums.search_query.clone());
         }
         _ => {}
     }
@@ -984,6 +1130,7 @@ fn handle_command_input(
     key: KeyEvent,
     tx: &Sender<AppEvent>,
     client: &DaemonClient,
+    handle: &Handle,
 ) {
     match key.code {
         KeyCode::Esc => {
@@ -997,7 +1144,7 @@ fn handle_command_input(
             let cmd = app.cmd_input.trim().to_string();
             app.cmd_input.clear();
             app.input_mode = InputMode::Normal;
-            exec_command(app, &cmd, tx, client);
+            exec_command(app, &cmd, tx, client, handle);
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.cmd_input.push(ch);
@@ -1006,7 +1153,7 @@ fn handle_command_input(
     }
 }
 
-fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return;
@@ -1023,7 +1170,7 @@ fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &Daemon
                     .iter()
                     .find(|sp| sp.name.to_lowercase().contains(&needle))
                 {
-                    spawn_set_speaker(client.clone(), tx.clone(), speaker.uuid.clone());
+                    spawn_set_speaker(handle, client.clone(), tx.clone(), speaker.uuid.clone());
                 } else {
                     app.set_status(format!("Speaker not found: {}", parts[1..].join(" ")));
                 }
@@ -1146,8 +1293,8 @@ enum SimpleAction {
     LineIn,
 }
 
-fn spawn_simple(client: DaemonClient, tx: Sender<AppEvent>, action: SimpleAction) {
-    spawn_task(tx, async move {
+fn spawn_simple(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, action: SimpleAction) {
+    spawn_task(handle, tx, async move {
         match action {
             SimpleAction::Stop => client.stop().await?,
             SimpleAction::Prev => client.prev().await?,
@@ -1158,57 +1305,57 @@ fn spawn_simple(client: DaemonClient, tx: Sender<AppEvent>, action: SimpleAction
     });
 }
 
-fn spawn_volume(client: DaemonClient, tx: Sender<AppEvent>, delta: i32) {
-    spawn_task(tx, async move {
+fn spawn_volume(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, delta: i32) {
+    spawn_task(handle, tx, async move {
         client.volume_relative(delta).await?;
         Ok(AppEvent::Status(String::new()))
     });
 }
 
-fn spawn_set_speaker(client: DaemonClient, tx: Sender<AppEvent>, uuid: String) {
-    spawn_task(tx, async move {
+fn spawn_set_speaker(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, uuid: String) {
+    spawn_task(handle, tx, async move {
         client.set_active_speaker(&uuid).await?;
         Ok(AppEvent::Status(String::new()))
     });
 }
 
-fn spawn_queue_play(client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
-    spawn_task(tx, async move {
+fn spawn_queue_play(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
+    spawn_task(handle, tx, async move {
         client.queue_play(pos).await?;
         Ok(AppEvent::Status(String::new()))
     });
 }
 
-fn spawn_queue_delete(client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
-    spawn_task(tx, async move {
+fn spawn_queue_delete(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
+    spawn_task(handle, tx, async move {
         client.queue_delete(pos).await?;
         Ok(AppEvent::Status(String::new()))
     });
 }
 
-fn spawn_queue_clear(client: DaemonClient, tx: Sender<AppEvent>) {
-    spawn_task(tx, async move {
+fn spawn_queue_clear(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
         client.queue_clear().await?;
         Ok(AppEvent::QueueCleared)
     });
 }
 
-fn spawn_queue_reorder(client: DaemonClient, tx: Sender<AppEvent>, from: i32, to: i32) {
-    spawn_task(tx, async move {
+fn spawn_queue_reorder(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, from: i32, to: i32) {
+    spawn_task(handle, tx, async move {
         client.queue_reorder(from, to).await?;
         Ok(AppEvent::Status(String::new()))
     });
 }
 
-fn spawn_queue_batch(client: DaemonClient, tx: Sender<AppEvent>, paths: Vec<String>, msg: String) {
-    spawn_task(tx, async move {
+fn spawn_queue_batch(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, paths: Vec<String>, msg: String) {
+    spawn_task(handle, tx, async move {
         client.queue_batch(paths).await?;
         Ok(AppEvent::Status(msg))
     });
 }
 
-fn spawn_album_add(client: DaemonClient, tx: Sender<AppEvent>, id: String, line_in: bool) {
-    spawn_task(tx, async move {
+fn spawn_album_add(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, id: String, line_in: bool) {
+    spawn_task(handle, tx, async move {
         let detail = client.album_detail(&id).await?;
         let count = detail.tracks.len();
         let paths: Vec<String> = detail.tracks.into_iter().map(|t| t.path).collect();
@@ -1222,32 +1369,33 @@ fn spawn_album_add(client: DaemonClient, tx: Sender<AppEvent>, id: String, line_
     });
 }
 
-fn spawn_status_load(client: DaemonClient, tx: Sender<AppEvent>) {
-    spawn_task(tx, async move {
+fn spawn_status_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
         Ok(AppEvent::Connected(client.status().await?))
     });
 }
 
-fn spawn_queue_load(client: DaemonClient, tx: Sender<AppEvent>) {
-    spawn_task(tx, async move {
+fn spawn_queue_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
         Ok(AppEvent::QueueLoaded(client.queue().await?))
     });
 }
 
-fn spawn_speakers_load(client: DaemonClient, tx: Sender<AppEvent>) {
-    spawn_task(tx, async move {
+fn spawn_speakers_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
         Ok(AppEvent::SpeakersLoaded(client.speakers().await?))
     });
 }
 
 fn spawn_library_column_load(
+    handle: &Handle,
     client: DaemonClient,
     tx: Sender<AppEvent>,
     depth: usize,
     path: String,
     title: String,
 ) {
-    spawn_task(tx, async move {
+    spawn_task(handle, tx, async move {
         let entries = client.library(&path).await?;
         Ok(AppEvent::LibraryColumnLoaded {
             depth,
@@ -1258,35 +1406,35 @@ fn spawn_library_column_load(
     });
 }
 
-fn spawn_library_search(client: DaemonClient, tx: Sender<AppEvent>, query: String) {
-    spawn_task(tx, async move {
+fn spawn_library_search(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, query: String) {
+    spawn_task(handle, tx, async move {
         let results = client.library_search(&query).await?;
         Ok(AppEvent::LibrarySearchLoaded(results))
     });
 }
 
-fn spawn_albums_load(client: DaemonClient, tx: Sender<AppEvent>) {
-    spawn_task(tx, async move {
+fn spawn_albums_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
         Ok(AppEvent::AlbumsLoaded(client.albums().await?))
     });
 }
 
-fn spawn_albums_search(client: DaemonClient, tx: Sender<AppEvent>, query: String) {
-    spawn_task(tx, async move {
+fn spawn_albums_search(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, query: String) {
+    spawn_task(handle, tx, async move {
         let albums = client.albums_search(&query).await?;
         Ok(AppEvent::AlbumsSearchLoaded(albums))
     });
 }
 
-fn spawn_album_detail_load(client: DaemonClient, tx: Sender<AppEvent>, id: String) {
-    spawn_task(tx, async move {
+fn spawn_album_detail_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, id: String) {
+    spawn_task(handle, tx, async move {
         let detail = client.album_detail(&id).await?;
         Ok(AppEvent::AlbumDetailLoaded { id, detail })
     });
 }
 
-fn spawn_art_load(client: DaemonClient, tx: Sender<AppEvent>, url: String) {
-    spawn_task(tx, async move {
+fn spawn_art_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, url: String) {
+    spawn_task(handle, tx, async move {
         let bytes = client.fetch_art_bytes(&url).await?;
         let reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
         let image = reader.decode()?.to_rgba8();
@@ -1301,15 +1449,9 @@ fn spawn_art_load(client: DaemonClient, tx: Sender<AppEvent>, url: String) {
     });
 }
 
-fn spawn_sse(client: DaemonClient, tx: Sender<AppEvent>) {
+fn spawn_sse(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    let handle = handle.clone();
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        let Ok(runtime) = runtime else {
-            let _ = tx.send(AppEvent::Error("Failed to start SSE runtime".to_string()));
-            return;
-        };
         let (evt_tx, evt_rx) = mpsc::channel();
         let bridge_tx = tx.clone();
         std::thread::spawn(move || {
@@ -1319,25 +1461,19 @@ fn spawn_sse(client: DaemonClient, tx: Sender<AppEvent>) {
                 }
             }
         });
-        if let Err(err) = runtime.block_on(client.stream_events(evt_tx)) {
+        if let Err(err) = handle.block_on(client.stream_events(evt_tx)) {
             let _ = tx.send(AppEvent::Error(format!("SSE error: {err}")));
         }
     });
 }
 
-fn spawn_task<F>(tx: Sender<AppEvent>, future: F)
+fn spawn_task<F>(handle: &Handle, tx: Sender<AppEvent>, future: F)
 where
     F: std::future::Future<Output = Result<AppEvent>> + Send + 'static,
 {
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        let Ok(runtime) = runtime else {
-            let _ = tx.send(AppEvent::Error("Failed to start async runtime".to_string()));
-            return;
-        };
-        let event = match runtime.block_on(future) {
+    let tx = tx.clone();
+    handle.spawn(async move {
+        let event = match future.await {
             Ok(event) => event,
             Err(err) => AppEvent::Error(err.to_string()),
         };
@@ -1360,6 +1496,11 @@ fn spawn_input_thread(tx: Sender<AppEvent>) {
             Ok(true) => match event::read() {
                 Ok(CEvent::Key(key)) => {
                     if tx.send(AppEvent::Key(key)).is_err() {
+                        break;
+                    }
+                }
+                Ok(CEvent::Resize(w, h)) => {
+                    if tx.send(AppEvent::Resize(w, h)).is_err() {
                         break;
                     }
                 }
@@ -1434,7 +1575,7 @@ fn library_preview_matches(app: &App, depth: usize, path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn queue_library_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &App, depth: usize) {
+fn queue_library_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &App, depth: usize, handle: &Handle) {
     if depth >= 2 {
         return;
     }
@@ -1448,6 +1589,7 @@ fn queue_library_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &App
         return;
     }
     spawn_library_column_load(
+        handle,
         client.clone(),
         tx.clone(),
         depth + 1,
@@ -1456,7 +1598,7 @@ fn queue_library_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &App
     );
 }
 
-fn move_library_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize) {
+fn move_library_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize, handle: &Handle) {
     let depth = app.library.active_column;
     let len = library_column_len(app, depth);
     if len == 0 {
@@ -1468,7 +1610,7 @@ fn move_library_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClie
     } else {
         (current + delta as usize).min(len.saturating_sub(1))
     };
-    set_library_cursor(app, tx, client, depth, next);
+    set_library_cursor(app, tx, client, depth, next, handle);
 }
 
 fn set_library_cursor(
@@ -1477,6 +1619,7 @@ fn set_library_cursor(
     client: &DaemonClient,
     depth: usize,
     cursor: usize,
+    handle: &Handle,
 ) {
     if let Some(column) = app.library.columns.get_mut(depth) {
         column.cursor = cursor.min(column.entries.len().saturating_sub(1));
@@ -1485,10 +1628,10 @@ fn set_library_cursor(
         app.library.cursor = cursor.min(app.library.entries.len().saturating_sub(1));
     }
     app.library.columns.truncate(depth + 1);
-    queue_library_preview(tx, client, app, depth);
+    queue_library_preview(tx, client, app, depth, handle);
 }
 
-fn library_enter_column(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient) {
+fn library_enter_column(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
     let depth = app.library.active_column;
     let Some(entry) = app
         .library
@@ -1506,6 +1649,7 @@ fn library_enter_column(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonCli
         || !library_preview_matches(app, depth + 1, &entry.path)
     {
         spawn_library_column_load(
+            handle,
             client.clone(),
             tx.clone(),
             depth + 1,
@@ -1569,17 +1713,17 @@ fn title_for_library_path(path: &str, fallback: &str) -> String {
     }
 }
 
-fn queue_album_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &mut App) {
+fn queue_album_preview(tx: &Sender<AppEvent>, client: &DaemonClient, app: &mut App, handle: &Handle) {
     if let Some(album) = current_album(app).cloned() {
         if app.albums.preview_id != album.id {
             app.albums.preview_id = album.id.clone();
             app.albums.expand_tracks.clear();
-            spawn_album_detail_load(client.clone(), tx.clone(), album.id);
+            spawn_album_detail_load(handle, client.clone(), tx.clone(), album.id);
         }
     }
 }
 
-fn move_album_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize) {
+fn move_album_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient, delta: isize, handle: &Handle) {
     let len = visible_albums(app).len();
     if len == 0 {
         return;
@@ -1590,5 +1734,5 @@ fn move_album_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient
         (app.albums.cursor + delta as usize).min(len.saturating_sub(1))
     };
     app.albums.cursor = next;
-    queue_album_preview(tx, client, app);
+    queue_album_preview(tx, client, app, handle);
 }
