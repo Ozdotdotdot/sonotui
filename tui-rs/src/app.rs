@@ -248,11 +248,7 @@ impl App {
     }
 
     pub fn current_album_name(&self) -> String {
-        if self.track.album.is_empty() {
-            "Unknown album".to_string()
-        } else {
-            self.track.album.clone()
-        }
+        self.current_track_album()
     }
 
     pub fn current_queue_item(&self) -> Option<&QueueItem> {
@@ -268,11 +264,52 @@ impl App {
         }
 
         self.queue.items.iter().find(|item| {
-            !item.title.is_empty()
-                && item.title == self.track.title
-                && (self.track.artist.is_empty() || item.artist == self.track.artist)
-                && (self.track.album.is_empty() || item.album == self.track.album)
+            let title_matches = !self.track.title.is_empty()
+                && normalize_text(&item.title) == normalize_text(&self.track.title);
+            let artist_matches = self.track.artist.is_empty()
+                || normalize_text(&item.artist) == normalize_text(&self.track.artist);
+            let album_matches = self.track.album.is_empty()
+                || normalize_text(&item.album) == normalize_text(&self.track.album);
+            title_matches && artist_matches && album_matches
         })
+    }
+
+    pub fn current_track_title(&self) -> String {
+        if !self.track.title.is_empty() {
+            self.track.title.clone()
+        } else if let Some(item) = self.current_queue_item() {
+            item.title.clone()
+        } else {
+            "Nothing playing".to_string()
+        }
+    }
+
+    pub fn current_track_artist(&self) -> String {
+        if !self.track.artist.is_empty() {
+            self.track.artist.clone()
+        } else if let Some(item) = self.current_queue_item() {
+            if item.artist.is_empty() {
+                "Unknown artist".to_string()
+            } else {
+                item.artist.clone()
+            }
+        } else {
+            "Unknown artist".to_string()
+        }
+    }
+
+    pub fn current_track_album(&self) -> String {
+        if !self.track.album.is_empty() {
+            self.track.album.clone()
+        } else if let Some(item) = self.current_queue_item() {
+            if item.album.is_empty() {
+                "Unknown album".to_string()
+            } else {
+                item.album.clone()
+            }
+        } else {
+            "Unknown album".to_string()
+        }
     }
 
     pub fn effective_duration(&self) -> i32 {
@@ -292,4 +329,12 @@ pub fn format_duration(secs: i32) -> String {
     let m = secs / 60;
     let s = secs % 60;
     format!("{m}:{s:02}")
+}
+
+fn normalize_text(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }

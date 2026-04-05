@@ -914,10 +914,10 @@ fn handle_library_search(
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.library.search_cursor = app.library.search_cursor.saturating_sub(1);
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        KeyCode::Up => {
             app.library.search_cursor = app.library.search_cursor.saturating_sub(1);
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        KeyCode::Down => {
             if app.library.search_cursor + 1 < app.library.search_results.len() {
                 app.library.search_cursor += 1;
             }
@@ -954,8 +954,8 @@ fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clie
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.albums.cursor = app.albums.cursor.saturating_sub(1);
         }
-        KeyCode::Char('k') | KeyCode::Up => app.albums.cursor = app.albums.cursor.saturating_sub(1),
-        KeyCode::Char('j') | KeyCode::Down => {
+        KeyCode::Up => app.albums.cursor = app.albums.cursor.saturating_sub(1),
+        KeyCode::Down => {
             if app.albums.cursor + 1 < app.albums.search_results.len() {
                 app.albums.cursor += 1;
             }

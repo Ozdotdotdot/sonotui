@@ -140,35 +140,19 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     };
     f.render_widget(Paragraph::new(transport_line), chunks[0]);
 
-    let title = if app.track.title.is_empty() {
-        "Nothing playing"
-    } else {
-        &app.track.title
-    };
+    let title = app.current_track_title();
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(title, theme::title_style()))),
         chunks[1],
     );
+    let artist = app.current_track_artist();
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            if app.track.artist.is_empty() {
-                "Unknown artist"
-            } else {
-                &app.track.artist
-            },
-            theme::artist_style(),
-        ))),
+        Paragraph::new(Line::from(Span::styled(artist, theme::artist_style()))),
         chunks[2],
     );
+    let album = app.current_track_album();
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            if app.track.album.is_empty() {
-                "Unknown album"
-            } else {
-                &app.track.album
-            },
-            theme::album_style(),
-        ))),
+        Paragraph::new(Line::from(Span::styled(album, theme::album_style()))),
         chunks[3],
     );
 

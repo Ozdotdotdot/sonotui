@@ -248,34 +248,26 @@ fn render_header_center(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let title = if app.track.title.is_empty() {
-        "Nothing playing"
-    } else {
-        &app.track.title
-    };
-    let artist = if app.track.artist.is_empty() {
-        "Unknown artist"
-    } else {
-        &app.track.artist
-    };
+    let title = app.current_track_title();
+    let artist = app.current_track_artist();
     let album = app.current_album_name();
     let line = if inner.width >= 44 {
         Line::from(vec![
             Span::styled(truncate(&album, 24), theme::dim_style()),
             Span::styled("  /  ", theme::dim_style()),
-            Span::styled(truncate(title, 26), theme::title_style()),
+            Span::styled(truncate(&title, 26), theme::title_style()),
             Span::styled("  •  ", theme::dim_style()),
-            Span::styled(truncate(artist, 20), theme::secondary_text()),
+            Span::styled(truncate(&artist, 20), theme::secondary_text()),
         ])
     } else if inner.width >= 28 {
         Line::from(vec![
-            Span::styled(truncate(title, 24), theme::title_style()),
+            Span::styled(truncate(&title, 24), theme::title_style()),
             Span::styled("  •  ", theme::dim_style()),
-            Span::styled(truncate(artist, 16), theme::secondary_text()),
+            Span::styled(truncate(&artist, 16), theme::secondary_text()),
         ])
     } else {
         Line::from(Span::styled(
-            truncate(title, inner.width as usize),
+            truncate(&title, inner.width as usize),
             theme::title_style(),
         ))
     };
