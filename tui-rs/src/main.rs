@@ -171,7 +171,51 @@ fn run_loop(
     // STATUS_POLL_INTERVAL defined at module level
 
     loop {
-        // Handle debounced resize
+        // ── 1. Wait for / receive next event ─────────────────────────────────
+        // Smart blocking: short timeout when a render is pending so we don't
+        // overshoot the frame budget; block indefinitely when idle (zero CPU).
+        let event = if render_wanted || resize_pending.is_some() {
+            let timeout = if render_wanted {
+                frame_duration.saturating_sub(last_render.elapsed())
+            } else {
+                RESIZE_DEBOUNCE.saturating_sub(
+                    resize_pending.map(|w| w.elapsed()).unwrap_or_default(),
+                )
+            };
+            match rx.recv_timeout(timeout) {
+                Ok(evt) => Some(evt),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow::anyhow!("event channel closed"));
+                }
+            }
+        } else {
+            Some(rx.recv().context("event channel closed")?)
+        };
+
+        // ── 2. Process event + drain the queue ───────────────────────────────
+        // Draining here — BEFORE rendering — ensures that a tab-switch keypress
+        // already queued updates `active_tab` before we call sync_direct_art,
+        // so the Kitty write is skipped when the user has already left the tab.
+        if let Some(event) = event {
+            process_event(
+                app, event, &tx, &client, handle, art_mode,
+                &mut render_wanted, &mut resize_pending, &mut tick_count,
+            );
+        }
+        while let Ok(event) = rx.try_recv() {
+            process_event(
+                app, event, &tx, &client, handle, art_mode,
+                &mut render_wanted, &mut resize_pending, &mut tick_count,
+            );
+        }
+
+        if app.should_quit {
+            clear_direct_art(terminal.backend_mut(), art_state)?;
+            break;
+        }
+
+        // ── 3. Handle debounced resize ────────────────────────────────────────
         if let Some(when) = resize_pending {
             if when.elapsed() >= RESIZE_DEBOUNCE {
                 resize_pending = None;
@@ -181,7 +225,7 @@ fn run_loop(
             }
         }
 
-        // Render when needed and frame budget allows
+        // ── 4. Render when needed and frame budget allows ─────────────────────
         if render_wanted && last_render.elapsed() >= frame_duration {
             let should_clear_direct_art = art_state.active
                 && (art_mode == ArtMode::None
@@ -227,47 +271,6 @@ fn run_loop(
             sync_direct_art(terminal.backend_mut(), app, art_mode, art_area, art_state)?;
             render_wanted = false;
             last_render = Instant::now();
-        }
-
-        // Smart blocking: short timeout if render pending, otherwise block indefinitely
-        let event = if render_wanted || resize_pending.is_some() {
-            let timeout = if render_wanted {
-                frame_duration.saturating_sub(last_render.elapsed())
-            } else {
-                RESIZE_DEBOUNCE.saturating_sub(
-                    resize_pending.map(|w| w.elapsed()).unwrap_or_default(),
-                )
-            };
-            match rx.recv_timeout(timeout) {
-                Ok(evt) => Some(evt),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow::anyhow!("event channel closed"));
-                }
-            }
-        } else {
-            Some(rx.recv().context("event channel closed")?)
-        };
-
-        // Process event
-        if let Some(event) = event {
-            process_event(
-                app, event, &tx, &client, handle, art_mode,
-                &mut render_wanted, &mut resize_pending, &mut tick_count,
-            );
-        }
-
-        // Drain queued events to coalesce bursts
-        while let Ok(event) = rx.try_recv() {
-            process_event(
-                app, event, &tx, &client, handle, art_mode,
-                &mut render_wanted, &mut resize_pending, &mut tick_count,
-            );
-        }
-
-        if app.should_quit {
-            clear_direct_art(terminal.backend_mut(), art_state)?;
-            break;
         }
     }
 
@@ -1436,15 +1439,21 @@ fn spawn_album_detail_load(handle: &Handle, client: DaemonClient, tx: Sender<App
 fn spawn_art_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, url: String) {
     spawn_task(handle, tx, async move {
         let bytes = client.fetch_art_bytes(&url).await?;
-        let reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-        let image = reader.decode()?.to_rgba8();
-        Ok(AppEvent::ArtLoaded {
-            url,
-            image: Some(ArtImageData {
+        // Decode on a blocking thread pool so we don't stall tokio workers.
+        let art_url = url.clone();
+        let image_data = tokio::task::spawn_blocking(move || -> anyhow::Result<ArtImageData> {
+            let reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+            let image = reader.decode()?.to_rgba8();
+            Ok(ArtImageData {
                 rgba: image.clone().into_raw(),
                 width: image.width(),
                 height: image.height(),
-            }),
+            })
+        })
+        .await??;
+        Ok(AppEvent::ArtLoaded {
+            url: art_url,
+            image: Some(image_data),
         })
     });
 }

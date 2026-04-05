@@ -30,12 +30,12 @@ fn render_columns(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_column(f: &mut Frame, area: Rect, app: &App, idx: usize) {
-    let title = app
-        .library
-        .columns
-        .get(idx)
-        .map(|c| c.title.as_str())
-        .unwrap_or("");
+    let title = match idx {
+        0 => "Artist",
+        1 => "Album",
+        2 => "Tracklist",
+        _ => "",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(if idx == app.library.active_column {
