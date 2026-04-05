@@ -152,7 +152,7 @@ fn run_loop(
         terminal.draw(|f| {
             let layout = Layout::vertical([
                 Constraint::Length(3),
-                Constraint::Length(3),
+                Constraint::Length(2),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])

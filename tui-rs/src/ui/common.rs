@@ -26,20 +26,19 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::shell_block());
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    if area.height == 0 {
+        return;
+    }
 
+    let tabs_area = Rect::new(area.x, area.y, area.width, 1);
     let bg = theme::tab_row_bg();
     let labels: Vec<String> = ALL_TABS
         .iter()
         .enumerate()
         .map(|(idx, tab)| format!(" {} {} ", idx + 1, tab.label()))
         .collect();
-    let total_width: usize = labels.iter().map(|label| label.width()).sum::<usize>() + 3 * 1;
-    let left_pad = inner.width.saturating_sub(total_width as u16) / 2;
+    let total_width: usize = labels.iter().map(|label| label.width()).sum::<usize>() + 3;
+    let left_pad = tabs_area.width.saturating_sub(total_width as u16) / 2;
 
     let mut spans = Vec::new();
     if left_pad > 0 {
@@ -61,7 +60,7 @@ pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(spans))
             .style(bg)
             .alignment(Alignment::Left),
-        inner,
+        tabs_area,
     );
 }
 
