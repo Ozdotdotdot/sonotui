@@ -9,17 +9,10 @@ use ratatui::{
 use crate::{app::App, theme};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::pane_border())
-        .title(" Library ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
     if app.library.searching {
-        render_search(f, inner, app);
+        render_search(f, area, app);
     } else {
-        render_columns(f, inner, app);
+        render_columns(f, area, app);
     }
 }
 
@@ -101,10 +94,7 @@ fn render_column(f: &mut Frame, area: Rect, app: &App, idx: usize) {
         "left/right move".to_string()
     };
     lines.push(Line::from(Span::styled(footer, theme::help_text())));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_search(f: &mut Frame, area: Rect, app: &App) {
@@ -156,10 +146,7 @@ fn render_search(f: &mut Frame, area: Rect, app: &App) {
         "enter jump to location   esc close search",
         theme::help_text(),
     )));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn visible_start(cursor: usize, height: usize, total: usize) -> usize {

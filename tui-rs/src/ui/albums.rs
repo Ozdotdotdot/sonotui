@@ -9,13 +9,6 @@ use ratatui::{
 use crate::{app::App, client::Album, theme};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::pane_border())
-        .title(" Albums ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
     if !app.library_ready {
         let percent = if app.albums.scan_progress > 0.0 {
             format!(" {:.0}%", app.albums.scan_progress * 100.0)
@@ -37,18 +30,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             )),
         ];
         f.render_widget(
-            Paragraph::new(lines)
-                .alignment(ratatui::layout::Alignment::Center)
-                .style(Style::default().bg(theme::BG)),
-            inner,
+            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            area,
         );
         return;
     }
 
     if app.albums.searching {
-        render_album_search(f, inner, app);
+        render_album_search(f, area, app);
     } else {
-        render_album_columns(f, inner, app);
+        render_album_columns(f, area, app);
     }
 }
 
@@ -98,10 +89,7 @@ fn render_album_list(f: &mut Frame, area: Rect, app: &App) {
         "hover previews tracks   enter/a add album",
         theme::help_text(),
     )));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_album_preview(f: &mut Frame, area: Rect, app: &App) {
@@ -159,10 +147,7 @@ fn render_album_preview(f: &mut Frame, area: Rect, app: &App) {
         "tracks update with hovered album",
         theme::help_text(),
     )));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_album_search(f: &mut Frame, area: Rect, app: &App) {
@@ -202,10 +187,7 @@ fn render_album_search(f: &mut Frame, area: Rect, app: &App) {
         "enter use results   esc close search",
         theme::help_text(),
     )));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn visible_albums(app: &App) -> &[Album] {

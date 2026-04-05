@@ -148,6 +148,16 @@ fn run_loop(
     art_state: &mut DirectArtState,
 ) -> Result<()> {
     loop {
+        let should_clear_direct_art = art_state.active
+            && (art_mode == ArtMode::None
+                || app.active_tab != Tab::NowPlaying
+                || app.help_active
+                || app.art_image_data.is_none());
+        if should_clear_direct_art {
+            clear_direct_art(terminal.backend_mut(), art_state)?;
+            terminal.clear()?;
+        }
+
         let mut art_area = None;
         terminal.draw(|f| {
             let layout = Layout::vertical([

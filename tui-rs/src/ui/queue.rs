@@ -65,10 +65,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         app.status_msg.clone()
     };
     lines.push(Line::from(Span::styled(footer, theme::help_text())));
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn visible_start(cursor: usize, height: usize, total: usize) -> usize {
