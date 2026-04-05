@@ -314,6 +314,13 @@ func sonosLineIn(ip, uuid string) error {
 	return err
 }
 
+func sonosQueue(ip, uuid string) error {
+	uri := fmt.Sprintf("x-rincon-queue:%s#0", uuid)
+	_, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "SetAVTransportURI",
+		map[string]string{"CurrentURI": uri, "CurrentURIMetaData": "", "InstanceID": "0"})
+	return err
+}
+
 func sonosSetVolume(ip string, vol int) error {
 	if vol < 0 {
 		vol = 0
@@ -483,7 +490,10 @@ func sonosClearQueue(ip string) error {
 }
 
 // PlayFromQueue seeks to a queue position and plays.
-func sonosPlayFromQueue(ip string, position int) error {
+func sonosPlayFromQueue(ip, uuid string, position int) error {
+	if err := sonosQueue(ip, uuid); err != nil {
+		return err
+	}
 	_, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "Seek",
 		map[string]string{"InstanceID": "0", "Target": strconv.Itoa(position), "Unit": "TRACK_NR"})
 	if err != nil {
@@ -1385,11 +1395,11 @@ func (sm *SonosManager) ClearQueue() error {
 }
 
 func (sm *SonosManager) PlayFromQueue(position int) error {
-	ip, _, err := sm.activeSpeakerIP()
+	ip, uuid, err := sm.activeSpeakerIP()
 	if err != nil {
 		return err
 	}
-	return sonosPlayFromQueue(ip, position)
+	return sonosPlayFromQueue(ip, uuid, position)
 }
 
 func (sm *SonosManager) ReorderQueue(from, to int) error {

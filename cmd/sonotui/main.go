@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -13,9 +14,10 @@ import (
 
 func main() {
 	var (
-		flagHost  = flag.String("host", "127.0.0.1", "sonotuid host")
-		flagPort  = flag.Int("port", 8989, "sonotuid API port")
-		flagDebug = flag.Bool("debug", false, "enable debug logging")
+		flagHost         = flag.String("host", "127.0.0.1", "sonotuid host")
+		flagPort         = flag.Int("port", 8989, "sonotuid API port")
+		flagDebug        = flag.Bool("debug", false, "enable debug logging")
+		flagStatusSecs   = flag.Int("status-seconds", 4, "seconds to show transient status messages")
 	)
 	flag.Parse()
 
@@ -30,6 +32,9 @@ func main() {
 	}
 
 	m := clienttui.NewModel(addr, clienttui.DetectProtocol())
+	if *flagStatusSecs > 0 {
+		m.SetStatusTTL(time.Duration(*flagStatusSecs) * time.Second)
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -79,6 +79,7 @@ type Model struct {
 	isLineIn  bool
 	speakers  []SpeakerInfo
 	speaker   *SpeakerInfo
+	statusTTL time.Duration
 
 	// UI state.
 	activeTab    int
@@ -114,6 +115,7 @@ func NewModel(addr DaemonAddr, artProto Protocol) Model {
 		client:    NewClient(addr),
 		transport: "STOPPED",
 		artProto:  artProto,
+		statusTTL: 4 * time.Second,
 		sseDone:   make(chan struct{}),
 		sseEvents: make(chan SSEEvent, 64),
 		queueTab:  NewQueueModel(),
@@ -146,7 +148,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.status != "" && time.Now().After(m.statusExpiry) {
-			m.status = ""
+			m.clearStatus()
 		}
 		return m, tickCmd()
 
@@ -205,7 +207,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statusClearMsg:
-		m.status = ""
+		m.clearStatus()
 		return m, nil
 
 	case errMsg:
@@ -215,11 +217,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case queueAddResultMsg:
 		if msg.count == 1 {
-			m.setStatus("Added 1 item to queue")
+			if m.isLineIn {
+				m.setStatus("Added 1 item to queue. Press space to switch from line-in.")
+			} else {
+				m.setStatus("Added 1 item to queue")
+			}
 		} else if msg.count > 1 {
-			m.setStatus(fmt.Sprintf("Added %d items to queue", msg.count))
+			if m.isLineIn {
+				m.setStatus(fmt.Sprintf("Added %d items to queue. Press space to switch from line-in.", msg.count))
+			} else {
+				m.setStatus(fmt.Sprintf("Added %d items to queue", msg.count))
+			}
 		} else {
-			m.setStatus("Added selection to queue")
+			if m.isLineIn {
+				m.setStatus("Added selection to queue. Press space to switch from line-in.")
+			} else {
+				m.setStatus("Added selection to queue")
+			}
 		}
 		return m, nil
 
@@ -419,7 +433,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !m.libTab.Searching && !m.albumTab.Searching {
 		switch {
 		case key.Matches(msg, globalKeys.PlayPause):
-			return m, cmdTogglePlayPause(m.client, m.transport)
+			return m, cmdTogglePlayPause(m.client, m.transport, m.isLineIn, len(m.queueTab.Items))
 		case key.Matches(msg, globalKeys.Stop):
 			return m, cmdPost(m.client, m.client.Stop)
 		case key.Matches(msg, globalKeys.Prev):
@@ -950,10 +964,24 @@ func (m *Model) syncTabDimensions() {
 
 func (m *Model) setStatus(msg string) {
 	m.status = msg
-	m.statusExpiry = time.Now().Add(3 * time.Second)
+	m.statusExpiry = time.Now().Add(m.statusTTL)
 	m.queueTab.StatusMsg = msg
 	m.libTab.StatusMsg = msg
 	m.albumTab.StatusMsg = msg
+}
+
+func (m *Model) clearStatus() {
+	m.status = ""
+	m.queueTab.StatusMsg = ""
+	m.libTab.StatusMsg = ""
+	m.albumTab.StatusMsg = ""
+}
+
+func (m *Model) SetStatusTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	m.statusTTL = d
 }
 
 func (m Model) helpOverlay() string {
@@ -1099,12 +1127,15 @@ func cmdSearchAlbums(c *Client, q string) tea.Cmd {
 	}
 }
 
-func cmdTogglePlayPause(c *Client, transport string) tea.Cmd {
+func cmdTogglePlayPause(c *Client, transport string, isLineIn bool, queueLen int) tea.Cmd {
 	return func() tea.Msg {
 		var err error
-		if transport == "PLAYING" {
+		switch {
+		case transport == "PLAYING" && !isLineIn:
 			err = c.Pause()
-		} else {
+		case isLineIn && queueLen > 0:
+			err = c.PlayFromQueue(1)
+		default:
 			err = c.Play()
 		}
 		if err != nil {
