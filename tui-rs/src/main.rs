@@ -338,6 +338,9 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                 app.duration = duration as i32;
                 app.track.duration = duration as i32;
             }
+            if let Some(uri) = evt.payload.get("uri").and_then(|v| v.as_str()) {
+                app.track.uri = uri.to_string();
+            }
             if let Some(url) = evt.payload.get("art_url").and_then(|v| v.as_str()) {
                 if url != app.art_url {
                     app.art_url = url.to_string();

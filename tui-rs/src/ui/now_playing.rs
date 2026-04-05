@@ -172,8 +172,9 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         chunks[3],
     );
 
-    let progress = if app.duration > 0 {
-        app.elapsed as f64 / app.duration as f64
+    let duration = app.effective_duration();
+    let progress = if duration > 0 {
+        app.elapsed as f64 / duration as f64
     } else {
         0.0
     };
@@ -185,7 +186,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" / ", theme::dim_style()),
-        Span::styled(format_duration(app.duration), theme::secondary_text()),
+        Span::styled(format_duration(duration), theme::secondary_text()),
     ]);
     f.render_widget(Paragraph::new(progress_line), chunks[4]);
     render_progress_bar(f.buffer_mut(), chunks[5], progress, theme::PRIMARY);

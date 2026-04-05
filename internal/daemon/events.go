@@ -101,6 +101,7 @@ func evtTrack(t TrackInfo) map[string]any {
 		"album":    t.Album,
 		"art_url":  t.ArtURL,
 		"duration": t.Duration,
+		"uri":      t.URI,
 	}
 }
 

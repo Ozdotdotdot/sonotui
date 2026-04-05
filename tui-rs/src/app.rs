@@ -254,6 +254,38 @@ impl App {
             self.track.album.clone()
         }
     }
+
+    pub fn current_queue_item(&self) -> Option<&QueueItem> {
+        if !self.track.uri.is_empty() {
+            if let Some(item) = self
+                .queue
+                .items
+                .iter()
+                .find(|item| item.uri == self.track.uri)
+            {
+                return Some(item);
+            }
+        }
+
+        self.queue.items.iter().find(|item| {
+            !item.title.is_empty()
+                && item.title == self.track.title
+                && (self.track.artist.is_empty() || item.artist == self.track.artist)
+                && (self.track.album.is_empty() || item.album == self.track.album)
+        })
+    }
+
+    pub fn effective_duration(&self) -> i32 {
+        if self.duration > 0 {
+            self.duration
+        } else if self.track.duration > 0 {
+            self.track.duration
+        } else {
+            self.current_queue_item()
+                .map(|item| item.duration)
+                .unwrap_or(0)
+        }
+    }
 }
 
 pub fn format_duration(secs: i32) -> String {

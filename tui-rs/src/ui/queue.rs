@@ -23,7 +23,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     for idx in start..(start + list_height).min(app.queue.items.len()) {
         let item = &app.queue.items[idx];
         let is_selected = idx == app.queue.cursor;
-        let is_playing = !app.track.uri.is_empty() && app.track.uri == item.uri;
+        let is_playing = app
+            .current_queue_item()
+            .map(|current| current.position == item.position)
+            .unwrap_or(false);
         let marker = if is_playing { "▶" } else { " " };
         let duration = if item.duration > 0 {
             crate::app::format_duration(item.duration)
