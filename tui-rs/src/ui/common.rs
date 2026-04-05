@@ -31,7 +31,6 @@ pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let tabs_area = Rect::new(area.x, area.y, area.width, 1);
-    let bg = theme::tab_row_bg();
     let labels: Vec<String> = ALL_TABS
         .iter()
         .enumerate()
@@ -42,24 +41,22 @@ pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = Vec::new();
     if left_pad > 0 {
-        spans.push(Span::styled(" ".repeat(left_pad as usize), bg));
+        spans.push(Span::raw(" ".repeat(left_pad as usize)));
     }
     for (idx, tab) in ALL_TABS.iter().enumerate() {
         let style = if *tab == app.active_tab {
             theme::tab_active()
         } else {
-            theme::tab_inactive().bg(theme::BG)
+            theme::tab_inactive()
         };
         spans.push(Span::styled(labels[idx].clone(), style));
         if idx < ALL_TABS.len() - 1 {
-            spans.push(Span::styled(" ", bg));
+            spans.push(Span::raw(" "));
         }
     }
 
     f.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(bg)
-            .alignment(Alignment::Left),
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         tabs_area,
     );
 }

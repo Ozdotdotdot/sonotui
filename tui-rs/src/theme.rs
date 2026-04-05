@@ -71,10 +71,6 @@ pub fn tab_inactive() -> Style {
     Style::default().fg(TEXT_SOFT)
 }
 
-pub fn tab_row_bg() -> Style {
-    Style::default().bg(SURFACE).fg(TEXT_SOFT)
-}
-
 pub fn selected_row() -> Style {
     Style::default()
         .fg(TEXT)
@@ -103,5 +99,5 @@ pub fn help_border() -> Style {
 }
 
 pub fn help_text() -> Style {
-    Style::default().fg(TEXT_SOFT)
+    Style::default().fg(MUTED)
 }

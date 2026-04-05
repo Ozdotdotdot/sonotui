@@ -258,6 +258,9 @@ fn run_loop(
                     if app.library.active_column > app.library.columns.len().saturating_sub(1) {
                         app.library.active_column = app.library.columns.len().saturating_sub(1);
                     }
+                    if depth < 2 {
+                        queue_library_preview(&tx, &client, app, depth);
+                    }
                 }
             }
             AppEvent::LibrarySearchLoaded(results) => {
