@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,13 +149,13 @@ func (l *Library) Browse(relPath string) ([]LibraryEntry, error) {
 			result = append(result, LibraryEntry{
 				Name: name,
 				Type: "dir",
-				Path: "/"+entryRel,
+				Path: "/" + entryRel,
 			})
 		} else if isAudioFile(name) {
 			le := LibraryEntry{
 				Name: name,
 				Type: "file",
-				Path: "/"+entryRel,
+				Path: "/" + entryRel,
 			}
 			if t, ok := trackMap[entryRel]; ok {
 				le.Title = t.Title
@@ -192,7 +194,7 @@ func (l *Library) SearchTracks(query string) []LibraryEntry {
 			entries = append(entries, LibraryEntry{
 				Name: filepath.Base(dir),
 				Type: "dir",
-				Path: "/"+dir,
+				Path: "/" + dir,
 			})
 			corpus = append(corpus, dir+" "+filepath.Base(dir))
 			next := filepath.ToSlash(filepath.Dir(dir))
@@ -205,7 +207,7 @@ func (l *Library) SearchTracks(query string) []LibraryEntry {
 		entries = append(entries, LibraryEntry{
 			Name:     filepath.Base(t.Path),
 			Type:     "file",
-			Path:     "/"+filepath.ToSlash(t.Path),
+			Path:     "/" + filepath.ToSlash(t.Path),
 			Title:    t.Title,
 			Artist:   t.Artist,
 			Album:    t.Album,
@@ -296,9 +298,9 @@ func (l *Library) TrackFileURI(lanIP string, filePort int, t Track) string {
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
 type libraryCache struct {
-	Tracks    []Track            `json:"tracks"`
-	Art       map[string][]byte  `json:"art"`
-	ScannedAt time.Time          `json:"scanned_at"`
+	Tracks    []Track           `json:"tracks"`
+	Art       map[string][]byte `json:"art"`
+	ScannedAt time.Time         `json:"scanned_at"`
 }
 
 // Scan scans the music root, calling progressFn with (scanned, total).
@@ -411,6 +413,7 @@ func readTrack(musicRoot, absPath string) (Track, []byte) {
 	}
 	n, _ := md.Track()
 	t.TrackNum = n
+	t.Duration = probeTrackDuration(absPath)
 
 	// Extract art.
 	var artData []byte
@@ -419,6 +422,30 @@ func readTrack(musicRoot, absPath string) (Track, []byte) {
 	}
 
 	return t, artData
+}
+
+func probeTrackDuration(absPath string) int {
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return 0
+	}
+
+	out, err := exec.Command(
+		ffprobe,
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		absPath,
+	).Output()
+	if err != nil {
+		return 0
+	}
+
+	secs, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return int(secs + 0.5)
 }
 
 func artHash(data []byte) string {

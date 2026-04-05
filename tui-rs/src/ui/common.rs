@@ -226,18 +226,13 @@ fn render_header_left(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::pane_border())
-        .title(" Speaker ");
+        .title(" Sonotui ");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let line = if inner.width >= 18 {
-        format!("sonotui  •  {}", app.active_speaker_name())
-    } else {
-        app.active_speaker_name().to_string()
-    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate(&line, inner.width as usize),
+            truncate(app.active_speaker_name(), inner.width as usize),
             theme::title_style(),
         )))
         .alignment(Alignment::Center),
