@@ -67,6 +67,11 @@ type Library struct {
 	ready     bool
 }
 
+var (
+	ffprobePath string
+	ffprobeOnce sync.Once
+)
+
 // NewLibrary creates a Library.
 func NewLibrary(musicRoot, cachePath string) *Library {
 	return &Library{
@@ -425,8 +430,8 @@ func readTrack(musicRoot, absPath string) (Track, []byte) {
 }
 
 func probeTrackDuration(absPath string) int {
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
+	ffprobe := resolveFFprobe()
+	if ffprobe == "" {
 		return 0
 	}
 
@@ -446,6 +451,18 @@ func probeTrackDuration(absPath string) int {
 		return 0
 	}
 	return int(secs + 0.5)
+}
+
+func resolveFFprobe() string {
+	ffprobeOnce.Do(func() {
+		path, err := exec.LookPath("ffprobe")
+		if err != nil {
+			log.Printf("library scan: ffprobe not found; track durations will be unavailable for scanned local files")
+			return
+		}
+		ffprobePath = path
+	})
+	return ffprobePath
 }
 
 func artHash(data []byte) string {

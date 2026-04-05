@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{app::App, theme};
 
@@ -16,9 +17,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let list_height = inner.height.saturating_sub(2) as usize;
+    let artist_w = ((inner.width as usize * 21) / 100).clamp(12, 26);
+    let title_w = ((inner.width as usize * 33) / 100).clamp(16, 34);
+    let album_w = ((inner.width as usize * 30) / 100).clamp(14, 32);
+    let duration_w = 8usize.min(inner.width as usize);
+    let list_height = inner.height.saturating_sub(3) as usize;
     let start = visible_start(app.queue.cursor, list_height, app.queue.items.len());
     let mut lines = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled(pad("Artist", artist_w), theme::dim_style()),
+        Span::raw("  "),
+        Span::styled(pad("Title", title_w), theme::dim_style()),
+        Span::raw("  "),
+        Span::styled(pad("Album", album_w), theme::dim_style()),
+        Span::raw("  "),
+        Span::styled(pad("Duration", duration_w), theme::dim_style()),
+    ]));
 
     for idx in start..(start + list_height).min(app.queue.items.len()) {
         let item = &app.queue.items[idx];
@@ -33,17 +48,34 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             "--:--".to_string()
         };
-        let text = truncate(
+        let artist = truncate(
             &format!(
-                "{} {} {:>2}  {}  {}  {}",
+                "{}{} {}",
                 if is_selected { "❯" } else { " " },
                 marker,
-                item.position,
-                item.title,
-                item.artist,
-                duration
+                if item.artist.is_empty() {
+                    "Unknown artist"
+                } else {
+                    &item.artist
+                }
             ),
-            inner.width as usize,
+            artist_w,
+        );
+        let title = truncate(
+            if item.title.is_empty() {
+                "Unknown title"
+            } else {
+                &item.title
+            },
+            title_w,
+        );
+        let album = truncate(
+            if item.album.is_empty() {
+                "Unknown album"
+            } else {
+                &item.album
+            },
+            album_w,
         );
         let style = if is_selected {
             theme::selected_row()
@@ -52,7 +84,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             theme::secondary_text()
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(vec![
+            Span::styled(pad(&artist, artist_w), style),
+            Span::raw("  "),
+            Span::styled(pad(&title, title_w), style),
+            Span::raw("  "),
+            Span::styled(pad(&album, album_w), style),
+            Span::raw("  "),
+            Span::styled(pad_left(&duration, duration_w), style),
+        ]));
     }
 
     while lines.len() < list_height {
@@ -84,13 +124,37 @@ fn visible_start(cursor: usize, height: usize, total: usize) -> usize {
 }
 
 fn truncate(input: &str, width: usize) -> String {
-    if input.chars().count() <= width {
+    if input.width() <= width {
         input.to_string()
     } else if width <= 1 {
         String::new()
     } else {
-        let mut out: String = input.chars().take(width - 1).collect();
+        let mut out = String::new();
+        for ch in input.chars() {
+            if out.width() + ch.width().unwrap_or(0) >= width {
+                break;
+            }
+            out.push(ch);
+        }
         out.push('…');
         out
+    }
+}
+
+fn pad(input: &str, width: usize) -> String {
+    let visible = input.width();
+    if visible >= width {
+        input.to_string()
+    } else {
+        format!("{input}{}", " ".repeat(width - visible))
+    }
+}
+
+fn pad_left(input: &str, width: usize) -> String {
+    let visible = input.width();
+    if visible >= width {
+        input.to_string()
+    } else {
+        format!("{}{input}", " ".repeat(width - visible))
     }
 }

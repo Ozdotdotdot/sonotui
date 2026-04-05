@@ -643,6 +643,68 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
 }
 
 fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
+    if app.library.searching {
+        match key.code {
+            KeyCode::Esc => {
+                app.library.searching = false;
+                app.library.search_query.clear();
+                app.library.search_results.clear();
+                app.library.search_cursor = 0;
+            }
+            KeyCode::Char('/') => {
+                app.library.search_query.clear();
+                app.library.search_results.clear();
+                app.library.search_cursor = 0;
+                app.input_mode = InputMode::Search;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.library.search_cursor = app.library.search_cursor.saturating_sub(1);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if app.library.search_cursor + 1 < app.library.search_results.len() {
+                    app.library.search_cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(entry) = app
+                    .library
+                    .search_results
+                    .get(app.library.search_cursor)
+                    .cloned()
+                {
+                    app.library.searching = false;
+                    app.library.search_query.clear();
+                    app.library.search_results.clear();
+                    app.input_mode = InputMode::Normal;
+                    if entry.entry_type == "dir" {
+                        spawn_library_column_load(
+                            client.clone(),
+                            tx.clone(),
+                            0,
+                            entry.path.clone(),
+                            title_for_library_path(&entry.path, &entry.name),
+                        );
+                    } else {
+                        let dir = entry
+                            .path
+                            .rsplit_once('/')
+                            .map(|(parent, _)| format!("/{parent}"))
+                            .unwrap_or_else(|| "/".to_string());
+                        spawn_library_column_load(
+                            client.clone(),
+                            tx.clone(),
+                            0,
+                            dir.clone(),
+                            title_for_library_path(&dir, ""),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('k') | KeyCode::Up => move_library_cursor(app, tx, client, -1),
         KeyCode::Char('j') | KeyCode::Down => {
@@ -737,6 +799,50 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
         return;
     }
 
+    if app.albums.searching {
+        match key.code {
+            KeyCode::Esc => {
+                app.albums.searching = false;
+                app.albums.search_query.clear();
+                app.albums.search_results.clear();
+                app.albums.cursor = 0;
+            }
+            KeyCode::Char('/') => {
+                app.albums.search_query.clear();
+                app.albums.search_results.clear();
+                app.albums.cursor = 0;
+                app.input_mode = InputMode::Search;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.albums.cursor = app.albums.cursor.saturating_sub(1);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if app.albums.cursor + 1 < app.albums.search_results.len() {
+                    app.albums.cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(selected) = app.albums.search_results.get(app.albums.cursor).cloned() {
+                    if let Some(idx) = app
+                        .albums
+                        .albums
+                        .iter()
+                        .position(|album| album.id == selected.id)
+                    {
+                        app.albums.cursor = idx;
+                    }
+                    app.albums.searching = false;
+                    app.albums.search_query.clear();
+                    app.albums.search_results.clear();
+                    app.input_mode = InputMode::Normal;
+                    queue_album_preview(tx, client, app);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('k') | KeyCode::Up => move_album_cursor(app, tx, client, -1),
         KeyCode::Char('j') | KeyCode::Down => {
@@ -790,9 +896,6 @@ fn handle_library_search(
 ) {
     match key.code {
         KeyCode::Esc => {
-            app.library.searching = false;
-            app.library.search_query.clear();
-            app.library.search_results.clear();
             app.input_mode = InputMode::Normal;
         }
         KeyCode::Backspace => {
@@ -820,39 +923,7 @@ fn handle_library_search(
             }
         }
         KeyCode::Enter => {
-            if let Some(entry) = app
-                .library
-                .search_results
-                .get(app.library.search_cursor)
-                .cloned()
-            {
-                app.library.searching = false;
-                app.library.search_query.clear();
-                app.library.search_results.clear();
-                app.input_mode = InputMode::Normal;
-                if entry.entry_type == "dir" {
-                    spawn_library_column_load(
-                        client.clone(),
-                        tx.clone(),
-                        0,
-                        entry.path.clone(),
-                        title_for_library_path(&entry.path, &entry.name),
-                    );
-                } else {
-                    let dir = entry
-                        .path
-                        .rsplit_once('/')
-                        .map(|(parent, _)| format!("/{parent}"))
-                        .unwrap_or_else(|| "/".to_string());
-                    spawn_library_column_load(
-                        client.clone(),
-                        tx.clone(),
-                        0,
-                        dir.clone(),
-                        title_for_library_path(&dir, ""),
-                    );
-                }
-            }
+            app.input_mode = InputMode::Normal;
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.library.search_query.push(ch);
@@ -865,9 +936,6 @@ fn handle_library_search(
 fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
     match key.code {
         KeyCode::Esc => {
-            app.albums.searching = false;
-            app.albums.search_query.clear();
-            app.albums.search_results.clear();
             app.input_mode = InputMode::Normal;
         }
         KeyCode::Backspace => {
@@ -893,10 +961,7 @@ fn handle_album_search(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clie
             }
         }
         KeyCode::Enter => {
-            app.albums.searching = false;
-            app.albums.search_query.clear();
             app.input_mode = InputMode::Normal;
-            queue_album_preview(tx, client, app);
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.albums.search_query.push(ch);
