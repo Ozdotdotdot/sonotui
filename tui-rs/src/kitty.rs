@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use base64::Engine;
+use crossterm::terminal;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use ratatui::layout::Rect;
@@ -71,14 +72,19 @@ const GRID: &[&str] = &[
     "\u{1D243}","\u{1D244}",
 ];
 
-/// Prepared image data ready for Kitty protocol transmission.
 pub struct KittyImageData {
     pub b64_payload: String,
     pub img_width: u32,
     pub img_height: u32,
 }
 
-/// Encode RGBA bytes into zlib-compressed, base64-encoded payload for Kitty protocol.
+#[derive(Debug, Clone, Copy)]
+pub struct AlignedArea {
+    pub area: Rect,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
 pub fn encode_kitty_payload(rgba: &[u8], width: u32, height: u32) -> KittyImageData {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
     encoder.write_all(rgba).expect("zlib write");
@@ -91,23 +97,16 @@ pub fn encode_kitty_payload(rgba: &[u8], width: u32, height: u32) -> KittyImageD
     }
 }
 
-/// Write Kitty graphics protocol escape sequences directly to stdout,
-/// bypassing ratatui's buffer. This uploads the image and places the
-/// Unicode virtual placement grid.
-///
-/// `area` is the terminal cell rectangle where the image should appear.
 pub fn display_kitty_image(
     stdout: &mut impl Write,
     data: &KittyImageData,
     area: Rect,
 ) -> std::io::Result<()> {
-    // Delete any existing images
     write!(stdout, "\x1b_Ga=d,d=A,q=2\x1b\\")?;
 
-    // Upload image in 4096-char base64 chunks
     let mut chars = data.b64_payload.chars().peekable();
     let first: String = chars.by_ref().take(4096).collect();
-    let more = if chars.peek().is_some() { 1 } else { 0 };
+    let more = i32::from(chars.peek().is_some());
 
     write!(
         stdout,
@@ -118,20 +117,16 @@ pub fn display_kitty_image(
 
     while chars.peek().is_some() {
         let chunk: String = chars.by_ref().take(4096).collect();
-        let m = if chars.peek().is_some() { 1 } else { 0 };
+        let m = i32::from(chars.peek().is_some());
         write!(stdout, "\x1b_Gm={m};{chunk}\x1b\\")?;
     }
 
-    // Write Unicode placeholder grid
     write_placeholder_grid(stdout, area)?;
-
     stdout.flush()?;
     Ok(())
 }
 
-/// Delete all Kitty images and clear the area.
 pub fn hide_kitty_image(stdout: &mut impl Write, area: Rect) -> std::io::Result<()> {
-    // Clear area with spaces
     for y in 0..area.height {
         write!(
             stdout,
@@ -148,26 +143,89 @@ pub fn hide_kitty_image(stdout: &mut impl Write, area: Rect) -> std::io::Result<
 
 fn write_placeholder_grid(w: &mut impl Write, area: Rect) -> std::io::Result<()> {
     for y in 0..area.height {
-        // Move cursor to start of row
         write!(w, "\x1b[{};{}H", area.y + y + 1, area.x + 1)?;
-        // Set foreground color (required for virtual placement)
         write!(w, "\x1b[38;5;1m")?;
-
         for x in 0..area.width {
             let row = GRID.get(y as usize).unwrap_or(&GRID[0]);
             let col = GRID.get(x as usize).unwrap_or(&GRID[0]);
             write!(w, "{DELIM}{row}{col}")?;
         }
-
         write!(w, "\x1b[39m")?;
     }
     Ok(())
 }
 
-// ── Half-block fallback renderer ───────────────────────────────────────────
+pub fn art_placeholder() -> String {
+    "╭──────────╮\n│    ♫     │\n╰──────────╯".to_string()
+}
 
-/// Render image as Unicode half-block characters with 24-bit ANSI color.
-/// Each terminal cell represents 2 vertical pixels using ▀ (upper half block).
+pub fn align_image_to_area(area: Rect, image_width: u32, image_height: u32) -> AlignedArea {
+    if area.width == 0 || area.height == 0 || image_width == 0 || image_height == 0 {
+        return AlignedArea {
+            area,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+    }
+
+    let (cell_width, cell_height) = terminal::window_size()
+        .ok()
+        .and_then(|size| {
+            if size.columns == 0 || size.rows == 0 {
+                None
+            } else {
+                Some((
+                    size.width as f64 / size.columns as f64,
+                    size.height as f64 / size.rows as f64,
+                ))
+            }
+        })
+        .unwrap_or((8.0, 16.0));
+
+    let bounds_px_w = area.width as f64 * cell_width;
+    let bounds_px_h = area.height as f64 * cell_height;
+    let scale = (bounds_px_w / image_width as f64).min(bounds_px_h / image_height as f64);
+    let used_px_w = (image_width as f64 * scale).round().max(1.0);
+    let used_px_h = (image_height as f64 * scale).round().max(1.0);
+
+    let used_cells_w = ((used_px_w / cell_width).ceil() as u16).clamp(1, area.width);
+    let used_cells_h = ((used_px_h / cell_height).ceil() as u16).clamp(1, area.height);
+    let x = area.x + area.width.saturating_sub(used_cells_w) / 2;
+    let y = area.y + area.height.saturating_sub(used_cells_h) / 2;
+
+    AlignedArea {
+        area: Rect::new(x, y, used_cells_w, used_cells_h),
+        pixel_width: used_px_w as u32,
+        pixel_height: used_px_h as u32,
+    }
+}
+
+pub fn resize_image_exact(
+    rgba: &[u8],
+    img_w: u32,
+    img_h: u32,
+    target_w: u32,
+    target_h: u32,
+) -> (Vec<u8>, u32, u32) {
+    let new_w = target_w.max(1);
+    let new_h = target_h.max(1);
+    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
+
+    for y in 0..new_h {
+        for x in 0..new_w {
+            let src_x = (x * img_w / new_w).min(img_w.saturating_sub(1));
+            let src_y = (y * img_h / new_h).min(img_h.saturating_sub(1));
+            let si = ((src_y * img_w + src_x) * 4) as usize;
+            let di = ((y * new_w + x) * 4) as usize;
+            if si + 3 < rgba.len() && di + 3 < out.len() {
+                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            }
+        }
+    }
+
+    (out, new_w, new_h)
+}
+
 pub fn render_halfblock(rgba: &[u8], img_w: u32, img_h: u32, cols: u16, rows: u16) -> String {
     if cols == 0 || rows == 0 {
         return art_placeholder();
@@ -185,7 +243,6 @@ pub fn render_halfblock(rgba: &[u8], img_w: u32, img_h: u32, cols: u16, rows: u1
     }
 
     let pad_left = ((cols as u32).saturating_sub(dst_w) / 2) as usize;
-
     let mut buf = String::with_capacity((dst_w as usize + 40) * (dst_h as usize / 2));
 
     for y in (0..dst_h).step_by(2) {
@@ -218,53 +275,12 @@ fn sample_pixel(
     dst_w: u32,
     dst_h: u32,
 ) -> (u8, u8, u8) {
-    let src_x = (x * img_w / dst_w).min(img_w - 1);
-    let src_y = (y * img_h / dst_h).min(img_h - 1);
+    let src_x = (x * img_w / dst_w).min(img_w.saturating_sub(1));
+    let src_y = (y * img_h / dst_h).min(img_h.saturating_sub(1));
     let idx = ((src_y * img_w + src_x) * 4) as usize;
     if idx + 2 < rgba.len() {
         (rgba[idx], rgba[idx + 1], rgba[idx + 2])
     } else {
         (0, 0, 0)
     }
-}
-
-pub fn art_placeholder() -> String {
-    "╭──────────╮\n│    ♫     │\n╰──────────╯".to_string()
-}
-
-/// Resize image to fit within target cols×rows (in cells).
-/// Returns (rgba_bytes, pixel_width, pixel_height).
-/// For Kitty protocol, we size based on cell pixel dimensions if available,
-/// otherwise use a reasonable assumption (cols*cell_width, rows*cell_height).
-pub fn resize_image_for_area(
-    rgba: &[u8],
-    img_w: u32,
-    img_h: u32,
-    target_cols: u16,
-    target_rows: u16,
-) -> (Vec<u8>, u32, u32) {
-    // Assume roughly 8x16 pixel cells (common for most terminals)
-    let target_pw = target_cols as u32 * 8;
-    let target_ph = target_rows as u32 * 16;
-
-    let scale_x = target_pw as f64 / img_w as f64;
-    let scale_y = target_ph as f64 / img_h as f64;
-    let scale = scale_x.min(scale_y).min(1.0); // don't upscale
-
-    let new_w = ((img_w as f64 * scale).round() as u32).max(1);
-    let new_h = ((img_h as f64 * scale).round() as u32).max(1);
-
-    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
-    for y in 0..new_h {
-        for x in 0..new_w {
-            let src_x = (x * img_w / new_w).min(img_w - 1);
-            let src_y = (y * img_h / new_h).min(img_h - 1);
-            let si = ((src_y * img_w + src_x) * 4) as usize;
-            let di = ((y * new_w + x) * 4) as usize;
-            if si + 3 < rgba.len() && di + 3 < out.len() {
-                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
-            }
-        }
-    }
-    (out, new_w, new_h)
 }

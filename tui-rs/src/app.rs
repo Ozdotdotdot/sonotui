@@ -235,6 +235,32 @@ impl App {
             _ => &self.transport,
         }
     }
+
+    pub fn active_speaker_name(&self) -> &str {
+        self.speaker
+            .as_ref()
+            .map(|s| s.name.as_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("No speaker")
+    }
+
+    pub fn now_playing_summary(&self) -> String {
+        if self.is_line_in {
+            return "Line-In".to_string();
+        }
+        let mut parts = Vec::new();
+        if !self.track.title.is_empty() {
+            parts.push(self.track.title.clone());
+        }
+        if !self.track.artist.is_empty() {
+            parts.push(self.track.artist.clone());
+        }
+        if parts.is_empty() {
+            "Nothing queued".to_string()
+        } else {
+            parts.join("  •  ")
+        }
+    }
 }
 
 pub fn format_duration(secs: i32) -> String {

@@ -150,28 +150,30 @@ fn run_loop(
         terminal.draw(|f| {
             let layout = Layout::vertical([
                 Constraint::Length(1),
+                Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
             .split(f.area());
 
-            ui::render_tab_bar(f, layout[0], app);
+            ui::common::render_header(f, layout[0], app);
+            ui::render_tab_bar(f, layout[1], app);
 
             if !app.connected {
-                ui::common::render_connecting(f, layout[1], app);
+                ui::common::render_connecting(f, layout[2], app);
             } else {
                 match app.active_tab {
                     Tab::NowPlaying => {
-                        ui::now_playing::render(f, layout[1], app, art_mode == ArtMode::None);
-                        art_area = Some(ui::now_playing::art_area(layout[1], app));
+                        ui::now_playing::render(f, layout[2], app, art_mode == ArtMode::None);
+                        art_area = Some(ui::now_playing::art_area(layout[2], app));
                     }
-                    Tab::Queue => ui::queue::render(f, layout[1], app),
-                    Tab::Library => ui::library::render(f, layout[1], app),
-                    Tab::Albums => ui::albums::render(f, layout[1], app),
+                    Tab::Queue => ui::queue::render(f, layout[2], app),
+                    Tab::Library => ui::library::render(f, layout[2], app),
+                    Tab::Albums => ui::albums::render(f, layout[2], app),
                 }
             }
 
-            ui::render_command_line(f, layout[2], app);
+            ui::render_command_line(f, layout[3], app);
             ui::render_help_overlay(f, f.area(), app);
         })?;
 
@@ -962,15 +964,16 @@ fn sync_direct_art(
 
     match art_mode {
         ArtMode::Kitty => {
-            let (rgba, width, height) = kitty::resize_image_for_area(
+            let placement = kitty::align_image_to_area(area, image.width, image.height);
+            let (rgba, width, height) = kitty::resize_image_exact(
                 &image.rgba,
                 image.width,
                 image.height,
-                area.width,
-                area.height,
+                placement.pixel_width,
+                placement.pixel_height,
             );
             let encoded = kitty::encode_kitty_payload(&rgba, width, height);
-            kitty::display_kitty_image(&mut stdout, &encoded, area)?;
+            kitty::display_kitty_image(&mut stdout, &encoded, placement.area)?;
         }
         ArtMode::Halfblock => render_halfblock(&mut stdout, area, image)?,
         ArtMode::None => {}

@@ -16,7 +16,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::CYAN))
+        .border_style(theme::pane_border())
         .title(format!(" Library [{}] ", title));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -32,36 +32,41 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     for idx in start..(start + list_height).min(entries.len()) {
         let entry = &entries[idx];
-        let prefix = if entry.entry_type == "dir" {
-            "[D]"
-        } else {
-            "[F]"
-        };
-        let cursor = if idx == selected { "> " } else { "  " };
-        let detail = if app.library.searching {
-            format!("{} {}", entry.artist, entry.path)
-        } else if entry.duration > 0 {
-            crate::app::format_duration(entry.duration)
-        } else {
-            String::new()
-        };
         let label = if entry.title.is_empty() {
             &entry.name
         } else {
             &entry.title
         };
+        let icon = if entry.entry_type == "dir" {
+            "📁"
+        } else {
+            "♪"
+        };
+        let detail = if app.library.searching {
+            format!("{}  {}", entry.artist, entry.path)
+        } else if entry.duration > 0 {
+            crate::app::format_duration(entry.duration)
+        } else {
+            String::new()
+        };
         let text = truncate(
-            &format!("{cursor}{prefix} {label}  {detail}"),
+            &format!(
+                "{} {} {}  {}",
+                if idx == selected { "❯" } else { " " },
+                icon,
+                label,
+                detail
+            ),
             inner.width as usize,
         );
         let style = if idx == selected {
-            Style::default()
-                .fg(theme::WHITE)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row()
         } else if entry.entry_type == "dir" {
-            Style::default().fg(theme::ORANGE)
+            Style::default()
+                .fg(theme::WARM)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::GRAY)
+            theme::secondary_text()
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
@@ -78,8 +83,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.status_msg.clone()
     };
-    lines.push(Line::from(Span::styled(footer, theme::dim_style())));
-    f.render_widget(Paragraph::new(lines), inner);
+    lines.push(Line::from(Span::styled(footer, theme::help_text())));
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+        inner,
+    );
 }
 
 fn visible_start(cursor: usize, height: usize, total: usize) -> usize {

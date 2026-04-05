@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -11,7 +11,7 @@ use crate::{app::App, theme};
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::PURPLE))
+        .border_style(theme::pane_border_focus())
         .title(format!(" Queue [{} tracks] ", app.queue.items.len()));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -22,30 +22,32 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     for idx in start..(start + list_height).min(app.queue.items.len()) {
         let item = &app.queue.items[idx];
-        let cursor = if idx == app.queue.cursor { "> " } else { "  " };
-        let playing = if !app.track.uri.is_empty() && app.track.uri == item.uri {
-            ">> "
-        } else {
-            "   "
-        };
+        let is_selected = idx == app.queue.cursor;
+        let is_playing = !app.track.uri.is_empty() && app.track.uri == item.uri;
+        let marker = if is_playing { "▶" } else { " " };
         let duration = if item.duration > 0 {
             crate::app::format_duration(item.duration)
         } else {
-            String::new()
+            "--:--".to_string()
         };
         let text = truncate(
             &format!(
-                "{cursor}{playing}{:>2}  {}  {}  {}",
-                item.position, item.title, item.artist, duration
+                "{} {} {:>2}  {}  {}  {}",
+                if is_selected { "❯" } else { " " },
+                marker,
+                item.position,
+                item.title,
+                item.artist,
+                duration
             ),
             inner.width as usize,
         );
-        let style = if idx == app.queue.cursor {
-            Style::default()
-                .fg(theme::WHITE)
-                .add_modifier(Modifier::BOLD)
+        let style = if is_selected {
+            theme::selected_row()
+        } else if is_playing {
+            Style::default().fg(theme::PRIMARY)
         } else {
-            Style::default().fg(theme::GRAY)
+            theme::secondary_text()
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
@@ -62,8 +64,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.status_msg.clone()
     };
-    lines.push(Line::from(Span::styled(footer, theme::dim_style())));
-    f.render_widget(Paragraph::new(lines), inner);
+    lines.push(Line::from(Span::styled(footer, theme::help_text())));
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+        inner,
+    );
 }
 
 fn visible_start(cursor: usize, height: usize, total: usize) -> usize {

@@ -11,7 +11,7 @@ use crate::{app::App, client::Album, theme};
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::ORANGE))
+        .border_style(theme::pane_border())
         .title(" Albums ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -27,17 +27,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             Line::from(Span::styled(
                 format!("Scanning library...{percent}"),
                 Style::default()
-                    .fg(theme::WHITE)
+                    .fg(theme::TEXT)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Albums become available when the daemon finishes scanning.",
-                theme::dim_style(),
+                theme::secondary_text(),
             )),
         ];
         f.render_widget(
-            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            Paragraph::new(lines)
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().bg(theme::BG)),
             inner,
         );
         return;
@@ -60,8 +62,8 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
         let album = &albums[idx];
         let text = truncate(
             &format!(
-                "{}{}  {}  {} tracks",
-                if idx == app.albums.cursor { "> " } else { "  " },
+                "{} {}  {}  {} tracks",
+                if idx == app.albums.cursor { "❯" } else { " " },
                 album.title,
                 album.artist,
                 album.track_count
@@ -69,11 +71,9 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
             area.width as usize,
         );
         let style = if idx == app.albums.cursor {
-            Style::default()
-                .fg(theme::WHITE)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row()
         } else {
-            Style::default().fg(theme::GRAY)
+            theme::secondary_text()
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
@@ -90,8 +90,11 @@ fn render_list(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.status_msg.clone()
     };
-    lines.push(Line::from(Span::styled(footer, theme::dim_style())));
-    f.render_widget(Paragraph::new(lines), area);
+    lines.push(Line::from(Span::styled(footer, theme::help_text())));
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+        area,
+    );
 }
 
 fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
@@ -103,9 +106,7 @@ fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
     if let Some(album) = current_album(app) {
         lines.push(Line::from(Span::styled(
             truncate(&album.title, columns[1].width as usize),
-            Style::default()
-                .fg(theme::WHITE)
-                .add_modifier(Modifier::BOLD),
+            theme::title_style(),
         )));
         lines.push(Line::from(Span::styled(
             truncate(
@@ -115,7 +116,7 @@ fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
                 ),
                 columns[1].width as usize,
             ),
-            theme::dim_style(),
+            theme::artist_style(),
         )));
         lines.push(Line::from(""));
     }
@@ -124,15 +125,15 @@ fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
         let duration = if track.duration > 0 {
             crate::app::format_duration(track.duration)
         } else {
-            String::new()
+            "--:--".to_string()
         };
         let text = truncate(
             &format!(
-                "{}{:>2}  {}  {}",
+                "{} {:>2}  {}  {}",
                 if idx == app.albums.track_cursor {
-                    "> "
+                    "❯"
                 } else {
-                    "  "
+                    " "
                 },
                 idx + 1,
                 track.title,
@@ -141,16 +142,17 @@ fn render_expanded(f: &mut Frame, area: Rect, app: &App) {
             columns[1].width as usize,
         );
         let style = if idx == app.albums.track_cursor {
-            Style::default()
-                .fg(theme::WHITE)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row()
         } else {
-            Style::default().fg(theme::GRAY)
+            theme::secondary_text()
         };
         lines.push(Line::from(Span::styled(text, style)));
     }
 
-    f.render_widget(Paragraph::new(lines), columns[1]);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme::BG)),
+        columns[1],
+    );
 }
 
 fn visible_albums(app: &App) -> &[Album] {
