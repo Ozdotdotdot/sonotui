@@ -18,6 +18,7 @@ func main() {
 		flagPort         = flag.Int("port", 8989, "sonotuid API port")
 		flagDebug        = flag.Bool("debug", false, "enable debug logging")
 		flagStatusSecs   = flag.Int("status-seconds", 4, "seconds to show transient status messages")
+		flagArtProto     = flag.String("art-protocol", "", "terminal image protocol: kitty, sixel, none (default: auto-detect)")
 	)
 	flag.Parse()
 
@@ -31,7 +32,16 @@ func main() {
 		Port: *flagPort,
 	}
 
-	m := clienttui.NewModel(addr, clienttui.DetectProtocol())
+	artProto := clienttui.DetectProtocol()
+	if *flagArtProto != "" {
+		if p, ok := clienttui.ParseProtocol(*flagArtProto); ok {
+			artProto = p
+		} else {
+			fmt.Fprintf(os.Stderr, "unknown art-protocol %q, using auto-detect\n", *flagArtProto)
+		}
+	}
+
+	m := clienttui.NewModel(addr, artProto)
 	if *flagStatusSecs > 0 {
 		m.SetStatusTTL(time.Duration(*flagStatusSecs) * time.Second)
 	}

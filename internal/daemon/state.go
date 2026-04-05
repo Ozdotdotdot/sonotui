@@ -25,6 +25,7 @@ type TrackInfo struct {
 	Album    string `json:"album"`
 	ArtURL   string `json:"art_url"`
 	Duration int    `json:"duration"`
+	URI      string `json:"uri,omitempty"`
 }
 
 // QueueItem represents a single item in the Sonos queue.

@@ -181,7 +181,7 @@ func main() {
 	lib := daemon.NewLibrary(cfg.LibraryPath, cfg.CachePath)
 
 	// Sonos manager.
-	sonosMgr := daemon.NewSonosManager(state, events, cfg.LanIP, cfg.PreferredSpeaker)
+	sonosMgr := daemon.NewSonosManager(state, events, lib, cfg.LanIP, cfg.FilePort, cfg.PreferredSpeaker)
 
 	// File server on :8990.
 	fileHandler := daemon.NewFileServer(cfg.LibraryPath, lib).Handler()

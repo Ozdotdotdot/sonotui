@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -359,6 +360,7 @@ func sonosSetMute(ip string, muted bool) error {
 type positionResult struct {
 	Elapsed  int
 	Duration int
+	Track    TrackInfo
 }
 
 func sonosGetPositionInfo(ip string) (positionResult, error) {
@@ -367,10 +369,11 @@ func sonosGetPositionInfo(ip string) (positionResult, error) {
 	if err != nil {
 		return positionResult{}, err
 	}
-	fields := parseSOAPFields(raw, "TrackDuration", "RelTime")
+	fields := parseSOAPFields(raw, "TrackDuration", "RelTime", "TrackMetaData")
 	return positionResult{
 		Elapsed:  parseDuration(fields["RelTime"]),
 		Duration: parseDuration(fields["TrackDuration"]),
+		Track:    parseDIDLLite(ip, []byte(fields["TrackMetaData"])),
 	}, nil
 }
 
@@ -898,6 +901,7 @@ func parseDIDLLite(speakerIP string, data []byte) TrackInfo {
 		AlbumArt string `xml:"albumArtURI"`
 		Res      []struct {
 			Duration string `xml:"duration,attr"`
+			Value    string `xml:",chardata"`
 		} `xml:"res"`
 	}
 	type didlRoot struct {
@@ -913,8 +917,10 @@ func parseDIDLLite(speakerIP string, data []byte) TrackInfo {
 		artURL = "http://" + speakerIP + ":1400" + artURL
 	}
 	dur := 0
+	uri := ""
 	if len(item.Res) > 0 {
 		dur = parseDuration(item.Res[0].Duration)
+		uri = strings.TrimSpace(item.Res[0].Value)
 	}
 	return TrackInfo{
 		Title:    item.Title,
@@ -922,6 +928,7 @@ func parseDIDLLite(speakerIP string, data []byte) TrackInfo {
 		Album:    item.Album,
 		ArtURL:   artURL,
 		Duration: dur,
+		URI:      uri,
 	}
 }
 
@@ -975,21 +982,62 @@ func listenOnRange(lanIP string) (int, net.Listener, error) {
 type SonosManager struct {
 	state     *State
 	events    *Broadcaster
+	lib       *Library
 	notify    *NotifyServer
 	subs      []*Subscription
 	subsMu    sync.Mutex
 	lanIP     string
+	filePort  int
 	preferred string // preferred speaker UUID
 }
 
 // NewSonosManager creates a SonosManager.
-func NewSonosManager(state *State, events *Broadcaster, lanIP, preferred string) *SonosManager {
+func NewSonosManager(state *State, events *Broadcaster, lib *Library, lanIP string, filePort int, preferred string) *SonosManager {
 	return &SonosManager{
 		state:     state,
 		events:    events,
+		lib:       lib,
 		lanIP:     lanIP,
+		filePort:  filePort,
 		preferred: preferred,
 	}
+}
+
+func (sm *SonosManager) enrichTrackInfo(t TrackInfo) TrackInfo {
+	if sm.lib == nil || t.URI == "" {
+		return t
+	}
+	u, err := url.Parse(t.URI)
+	if err != nil {
+		return t
+	}
+	if !strings.HasPrefix(u.Path, "/files/") {
+		return t
+	}
+	relPath, err := url.PathUnescape(strings.TrimPrefix(u.Path, "/files/"))
+	if err != nil {
+		return t
+	}
+	track, ok := sm.lib.TrackByPath(relPath)
+	if !ok {
+		return t
+	}
+	if t.Title == "" {
+		t.Title = track.Title
+	}
+	if t.Artist == "" {
+		t.Artist = track.Artist
+	}
+	if t.Album == "" {
+		t.Album = track.Album
+	}
+	if t.Duration == 0 {
+		t.Duration = track.Duration
+	}
+	if t.ArtURL == "" && track.ArtHash != "" {
+		t.ArtURL = fmt.Sprintf("http://%s:%d/art/%s", sm.lanIP, sm.filePort, track.ArtHash)
+	}
+	return t
 }
 
 // Start launches background discovery and GENA listener.
@@ -1166,6 +1214,7 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 	sm.state.Lock()
 	prevTransport := sm.state.Transport
 	prevURI := sm.state.Track.ArtURL // use as proxy for track change detection
+	prevIsLineIn := sm.state.IsLineIn
 
 	if state.TransportState != "" {
 		sm.state.Transport = state.TransportState
@@ -1177,8 +1226,9 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 
 	if isLineIn {
 		sm.state.Track = TrackInfo{}
-	} else if state.Track.Title != "" || state.Track.ArtURL != "" {
-		sm.state.Track = state.Track
+	} else if state.CurrentTrackURI != "" {
+		track := sm.enrichTrackInfo(state.Track)
+		sm.state.Track = track
 		if state.Duration > 0 {
 			sm.state.Duration = state.Duration
 		}
@@ -1189,20 +1239,29 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 	if state.TransportState != "" {
 		sm.events.Send(evtTransport(state.TransportState))
 	}
-	if isLineIn {
-		sm.events.Send(evtLineIn(true))
-	} else {
-		if state.Track.Title != "" || state.Track.ArtURL != "" {
-			sm.events.Send(evtTrack(state.Track))
+	if prevIsLineIn != isLineIn {
+		sm.events.Send(evtLineIn(isLineIn))
+	}
+	if !isLineIn {
+		track := sm.enrichTrackInfo(state.Track)
+		if track.Title != "" || track.ArtURL != "" || track.URI != "" {
+			sm.events.Send(evtTrack(track))
 		}
 	}
 
 	// Resync position on track change or resume.
 	needsSync := false
+	if prevIsLineIn && !isLineIn {
+		needsSync = true
+	}
 	if !isLineIn && state.CurrentTrackURI != "" && state.Track.ArtURL != prevURI {
 		needsSync = true
 	}
 	if state.TransportState == "PLAYING" && (prevTransport == "PAUSED_PLAYBACK" || prevTransport == "STOPPED") {
+		needsSync = true
+	}
+	if !isLineIn && state.CurrentTrackURI != "" &&
+		(state.Track == (TrackInfo{}) || state.Duration == 0) {
 		needsSync = true
 	}
 
@@ -1217,7 +1276,14 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 			if pos.Duration > 0 {
 				sm.state.Duration = pos.Duration
 			}
+			if pos.Track != (TrackInfo{}) {
+				pos.Track = sm.enrichTrackInfo(pos.Track)
+				sm.state.Track = pos.Track
+			}
 			sm.state.Unlock()
+			if pos.Track != (TrackInfo{}) {
+				sm.events.Send(evtTrack(pos.Track))
+			}
 			sm.events.Send(evtPosition(pos.Elapsed, pos.Duration))
 		}()
 	}

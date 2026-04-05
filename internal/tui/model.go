@@ -159,11 +159,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Start SSE stream.
 		m.client.StreamEvents(m.sseEvents, m.sseDone)
 		// Fetch initial data.
-		return m, tea.Batch(
+		cmds := []tea.Cmd{
 			cmdWaitSSE(m.sseEvents),
 			cmdFetchQueue(m.client),
 			cmdFetchLibrary(m.client, "/"),
-		)
+		}
+		// If already playing when we connect, kick off art fetch now.
+		// (SSE track events won't re-trigger because m.artURL is already set.)
+		if m.artURL != "" {
+			cmds = append(cmds, cmdFetchArt(m.artURL, m.artProto))
+		}
+		return m, tea.Batch(cmds...)
 
 	case sseEventMsg:
 		evt := SSEEvent(msg)

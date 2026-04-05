@@ -31,12 +31,32 @@ func DetectProtocol() Protocol {
 	term := os.Getenv("TERM")
 	termProg := os.Getenv("TERM_PROGRAM")
 	switch {
-	case term == "xterm-kitty", termProg == "kitty":
+	// Kitty-native and Kitty-protocol-compatible terminals.
+	case term == "xterm-kitty",
+		termProg == "kitty",
+		termProg == "WezTerm",
+		strings.HasPrefix(term, "xterm-ghostty"),
+		termProg == "ghostty":
 		return ProtocolKitty
 	case strings.Contains(term, "sixel"):
 		return ProtocolSixel
 	default:
 		return ProtocolNone
+	}
+}
+
+// ParseProtocol converts a string flag value ("kitty", "sixel", "none") to a Protocol.
+// Returns ProtocolNone and false if the value is unrecognised.
+func ParseProtocol(s string) (Protocol, bool) {
+	switch strings.ToLower(s) {
+	case "kitty":
+		return ProtocolKitty, true
+	case "sixel":
+		return ProtocolSixel, true
+	case "none", "":
+		return ProtocolNone, true
+	default:
+		return ProtocolNone, false
 	}
 }
 
