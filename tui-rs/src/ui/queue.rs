@@ -101,7 +101,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     lines.push(Line::from(""));
     let footer = if app.queue.confirm_clear {
-        "Clear entire queue? [y]es / [n]o".to_string()
+        "Clear entire queue? [enter]/[y]es / [n]o".to_string()
     } else if app.status_msg.is_empty() {
         "p play   dd delete   D clear   J/K reorder   gg/G top/bottom".to_string()
     } else {

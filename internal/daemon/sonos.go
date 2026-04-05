@@ -423,12 +423,12 @@ func sonosGetQueue(ip string) ([]QueueItem, error) {
 }
 
 type didlQueueItem struct {
-	XMLName  xml.Name `xml:"item"`
-	ID       string   `xml:"id,attr"`
-	Title    string   `xml:"title"`
-	Creator  string   `xml:"creator"`
-	Album    string   `xml:"album"`
-	Res      []struct {
+	XMLName xml.Name `xml:"item"`
+	ID      string   `xml:"id,attr"`
+	Title   string   `xml:"title"`
+	Creator string   `xml:"creator"`
+	Album   string   `xml:"album"`
+	Res     []struct {
 		Duration string `xml:"duration,attr"`
 		Value    string `xml:",chardata"`
 	} `xml:"res"`
@@ -469,10 +469,10 @@ func sonosAddURIToQueue(ip, uri, metadata string) error {
 	_, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "AddURIToQueue",
 		map[string]string{
 			"DesiredFirstTrackNumberEnqueued": "0",
-			"EnqueueAsNext":                  "0",
-			"EnqueuedURI":                    uri,
-			"EnqueuedURIMetaData":            metadata,
-			"InstanceID":                     "0",
+			"EnqueueAsNext":                   "0",
+			"EnqueuedURI":                     uri,
+			"EnqueuedURIMetaData":             metadata,
+			"InstanceID":                      "0",
 		})
 	return err
 }
@@ -1213,7 +1213,7 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 
 	sm.state.Lock()
 	prevTransport := sm.state.Transport
-	prevURI := sm.state.Track.ArtURL // use as proxy for track change detection
+	prevURI := sm.state.Track.URI
 	prevIsLineIn := sm.state.IsLineIn
 
 	if state.TransportState != "" {
@@ -1228,6 +1228,9 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 		sm.state.Track = TrackInfo{}
 	} else if state.CurrentTrackURI != "" {
 		track := sm.enrichTrackInfo(state.Track)
+		if track.URI == "" {
+			track.URI = state.CurrentTrackURI
+		}
 		sm.state.Track = track
 		if state.Duration > 0 {
 			sm.state.Duration = state.Duration
@@ -1254,7 +1257,7 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 	if prevIsLineIn && !isLineIn {
 		needsSync = true
 	}
-	if !isLineIn && state.CurrentTrackURI != "" && state.Track.ArtURL != prevURI {
+	if !isLineIn && state.CurrentTrackURI != "" && state.CurrentTrackURI != prevURI {
 		needsSync = true
 	}
 	if state.TransportState == "PLAYING" && (prevTransport == "PAUSED_PLAYBACK" || prevTransport == "STOPPED") {
@@ -1278,6 +1281,9 @@ func (sm *SonosManager) handleAVTransport(speakerIP string, body []byte) {
 			}
 			if pos.Track != (TrackInfo{}) {
 				pos.Track = sm.enrichTrackInfo(pos.Track)
+				if pos.Track.URI == "" {
+					pos.Track.URI = state.CurrentTrackURI
+				}
 				sm.state.Track = pos.Track
 			}
 			sm.state.Unlock()

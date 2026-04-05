@@ -61,6 +61,7 @@ enum AppEvent {
     Key(KeyEvent),
     Connected(client::StatusResponse),
     QueueLoaded(Vec<client::QueueItem>),
+    QueueCleared,
     SpeakersLoaded(Vec<client::SpeakerInfo>),
     LibraryColumnLoaded {
         depth: usize,
@@ -226,6 +227,13 @@ fn run_loop(
                 if app.queue.cursor >= app.queue.items.len() {
                     app.queue.cursor = app.queue.items.len().saturating_sub(1);
                 }
+            }
+            AppEvent::QueueCleared => {
+                app.queue.items.clear();
+                app.queue.cursor = 0;
+                app.queue.dd_pending = false;
+                app.queue.confirm_clear = false;
+                app.set_status("Queue cleared");
             }
             AppEvent::SpeakersLoaded(speakers) => {
                 app.speakers = speakers;
@@ -566,7 +574,7 @@ fn handle_now_playing_key(key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonC
 fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient) {
     if app.queue.confirm_clear {
         match key.code {
-            KeyCode::Char('y') => {
+            KeyCode::Char('y') | KeyCode::Enter => {
                 app.queue.confirm_clear = false;
                 spawn_queue_clear(client.clone(), tx.clone());
             }
@@ -1181,7 +1189,7 @@ fn spawn_queue_delete(client: DaemonClient, tx: Sender<AppEvent>, pos: i32) {
 fn spawn_queue_clear(client: DaemonClient, tx: Sender<AppEvent>) {
     spawn_task(tx, async move {
         client.queue_clear().await?;
-        Ok(AppEvent::Status("Queue cleared".to_string()))
+        Ok(AppEvent::QueueCleared)
     });
 }
 
