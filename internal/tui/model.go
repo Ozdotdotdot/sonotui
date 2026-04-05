@@ -21,6 +21,7 @@ type artFetchedMsg struct {
 }
 type statusClearMsg struct{}
 type errMsg struct{ err error }
+type queueAddResultMsg struct{ count int }
 
 // daemonConnectedMsg is sent when initial /status fetch succeeds.
 type daemonConnectedMsg StatusResponse
@@ -77,6 +78,7 @@ type Model struct {
 	duration  int
 	isLineIn  bool
 	speakers  []SpeakerInfo
+	speaker   *SpeakerInfo
 
 	// UI state.
 	activeTab    int
@@ -211,6 +213,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setStatus(fmt.Sprintf("Error: %v", msg.err))
 		return m, nil
 
+	case queueAddResultMsg:
+		if msg.count == 1 {
+			m.setStatus("Added 1 item to queue")
+		} else if msg.count > 1 {
+			m.setStatus(fmt.Sprintf("Added %d items to queue", msg.count))
+		} else {
+			m.setStatus("Added selection to queue")
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -269,7 +281,14 @@ func (m *Model) handleSSEEvent(evt SSEEvent) []tea.Cmd {
 	case "queue_changed":
 		cmds = append(cmds, cmdFetchQueue(m.client))
 	case "speaker":
-		// Update active speaker display (handled via /status on connect).
+		sp := &SpeakerInfo{}
+		if name, ok := evt.Raw["name"]; ok {
+			sp.Name = ParseString(name)
+		}
+		if uuid, ok := evt.Raw["uuid"]; ok {
+			sp.UUID = ParseString(uuid)
+		}
+		m.speaker = sp
 	case "library_scan":
 		if s, ok := evt.Raw["status"]; ok {
 			status := ParseString(s)
@@ -298,6 +317,12 @@ func (m *Model) applyStatus(s *StatusResponse) {
 	m.duration = s.Duration
 	m.isLineIn = s.IsLineIn
 	m.albumTab.LibraryReady = s.LibraryReady
+	m.speaker = s.Speaker
+	if s.LibraryReady {
+		m.albumTab.ScanStatus = "done"
+	} else {
+		m.albumTab.ScanStatus = "scanning"
+	}
 
 	if artURL := s.Track.ArtURL; artURL != "" {
 		m.artURL = artURL
@@ -560,18 +585,29 @@ func (m Model) handleLibraryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			path := e.Path
 			cl := m.client
 			return m, func() tea.Msg {
-				cl.AddPathsToQueue([]string{path}) //nolint:errcheck
-				return nil
+				if err := cl.AddPathsToQueue([]string{path}); err != nil {
+					return errMsg{err}
+				}
+				return queueAddResultMsg{count: 1}
 			}
 		}
 	case key.Matches(msg, libraryKeys.Add):
-		if e := lt.CurrentEntry(); e != nil && e.Type == "file" {
+		if e := lt.CurrentEntry(); e != nil {
 			path := e.Path
 			cl := m.client
-			m.setStatus("Added to queue")
+			if e.Type == "dir" {
+				m.setStatus("Adding directory to queue…")
+			} else {
+				m.setStatus("Adding track to queue…")
+			}
 			return m, func() tea.Msg {
-				cl.AddPathsToQueue([]string{path}) //nolint:errcheck
-				return nil
+				if err := cl.AddPathsToQueue([]string{path}); err != nil {
+					return errMsg{err}
+				}
+				if e.Type == "dir" {
+					return queueAddResultMsg{count: -1}
+				}
+				return queueAddResultMsg{count: 1}
 			}
 		}
 	case key.Matches(msg, libraryKeys.AddAll):
@@ -584,10 +620,12 @@ func (m Model) handleLibraryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if len(paths) > 0 {
 			cl := m.client
-			m.setStatus(fmt.Sprintf("Added %d tracks to queue", len(paths)))
+			m.setStatus(fmt.Sprintf("Adding %d tracks to queue…", len(paths)))
 			return m, func() tea.Msg {
-				cl.AddPathsToQueue(paths) //nolint:errcheck
-				return nil
+				if err := cl.AddPathsToQueue(paths); err != nil {
+					return errMsg{err}
+				}
+				return queueAddResultMsg{count: len(paths)}
 			}
 		}
 	case key.Matches(msg, libraryKeys.Search):
@@ -622,14 +660,17 @@ func (m Model) handleLibrarySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case key.Matches(msg, libraryKeys.Enter):
 		if e := lt.CurrentEntry(); e != nil {
+			lt.Searching = false
+			lt.SearchQuery = ""
+			lt.SearchResults = nil
+			if e.Type == "dir" {
+				return m, cmdFetchLibrary(m.client, e.Path)
+			}
 			// Navigate to the file's directory.
 			dir := e.Path[:strings.LastIndex(e.Path, "/")]
 			if dir == "" {
 				dir = "/"
 			}
-			lt.Searching = false
-			lt.SearchQuery = ""
-			lt.SearchResults = nil
 			return m, cmdFetchLibrary(m.client, dir)
 		}
 	default:
@@ -886,6 +927,9 @@ func (m Model) View() string {
 }
 
 func (m Model) activeSpeakerName() string {
+	if m.speaker != nil && m.speaker.Name != "" {
+		return m.speaker.Name
+	}
 	if len(m.speakers) > 0 {
 		return m.speakers[0].Name
 	}
@@ -895,15 +939,21 @@ func (m Model) activeSpeakerName() string {
 func (m *Model) syncTabDimensions() {
 	m.queueTab.Width = m.width
 	m.queueTab.Height = m.height
+	m.queueTab.StatusMsg = m.status
 	m.libTab.Width = m.width
 	m.libTab.Height = m.height
+	m.libTab.StatusMsg = m.status
 	m.albumTab.Width = m.width
 	m.albumTab.Height = m.height
+	m.albumTab.StatusMsg = m.status
 }
 
 func (m *Model) setStatus(msg string) {
 	m.status = msg
 	m.statusExpiry = time.Now().Add(3 * time.Second)
+	m.queueTab.StatusMsg = msg
+	m.libTab.StatusMsg = msg
+	m.albumTab.StatusMsg = msg
 }
 
 func (m Model) helpOverlay() string {
@@ -1088,4 +1138,3 @@ func cmdFetchArt(url string, proto Protocol) tea.Cmd {
 		return artFetchedMsg{url: url, data: rendered}
 	}
 }
-

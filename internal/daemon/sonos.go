@@ -409,7 +409,7 @@ func sonosGetQueue(ip string) ([]QueueItem, error) {
 	if resultStr == "" {
 		return nil, nil
 	}
-	return parseQueueDIDL(html.UnescapeString(resultStr))
+	return parseQueueDIDL(resultStr)
 }
 
 type didlQueueItem struct {

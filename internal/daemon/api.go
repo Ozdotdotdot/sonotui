@@ -215,7 +215,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"duration":      snap.Duration,
 		"is_line_in":    snap.IsLineIn,
 		"speaker":       sp,
-		"library_ready": snap.LibraryReady,
+		"library_ready": a.lib.Ready(),
 	})
 }
 
@@ -338,21 +338,25 @@ func (a *API) handleBatchQueue(w http.ResponseWriter, r *http.Request) {
 
 	added := 0
 	for _, p := range body.Paths {
-		t, ok := a.lib.TrackByPath(p)
-		if !ok {
-			continue
+		var tracks []Track
+		if t, ok := a.lib.TrackByPath(p); ok {
+			tracks = []Track{t}
+		} else {
+			tracks = a.lib.TracksInDir(p)
 		}
-		fileURI := a.lib.TrackFileURI(a.lanIP, a.filePort, t)
-		artURI := ""
-		if t.ArtHash != "" {
-			artURI = fmt.Sprintf("http://%s:%d/art/%s", a.lanIP, a.filePort, t.ArtHash)
+		for _, t := range tracks {
+			fileURI := a.lib.TrackFileURI(a.lanIP, a.filePort, t)
+			artURI := ""
+			if t.ArtHash != "" {
+				artURI = fmt.Sprintf("http://%s:%d/art/%s", a.lanIP, a.filePort, t.ArtHash)
+			}
+			metadata := BuildDIDLLite(t, fileURI, artURI)
+			if err := a.sonos.AddToQueue(fileURI, metadata); err != nil {
+				log.Printf("batch queue add %s: %v", p, err)
+				continue
+			}
+			added++
 		}
-		metadata := BuildDIDLLite(t, fileURI, artURI)
-		if err := a.sonos.AddToQueue(fileURI, metadata); err != nil {
-			log.Printf("batch queue add %s: %v", p, err)
-			continue
-		}
-		added++
 	}
 
 	snap := a.state.Snapshot()

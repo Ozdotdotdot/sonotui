@@ -168,6 +168,11 @@ func (m *LibraryModel) libRenderSearchResult(i int, e LibraryEntry, availW int) 
 	if i == m.SearchCursor {
 		cursor = libCursorStyle.Render("→ ")
 	}
+	if e.Type == "dir" {
+		path := libDimStyle.Render(truncate(e.Path, availW/2))
+		name := libDirStyle.Render(truncate(e.Name, availW/2))
+		return cursor + "📁 " + name + " " + path
+	}
 	title := e.Title
 	if title == "" {
 		title = e.Name

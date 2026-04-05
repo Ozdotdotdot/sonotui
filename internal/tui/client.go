@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -127,6 +128,9 @@ func (c *Client) GetStatus() (*StatusResponse, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var s StatusResponse
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
 		return nil, err
@@ -141,6 +145,9 @@ func (c *Client) GetQueue() ([]QueueItem, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var items []QueueItem
 	return items, json.NewDecoder(resp.Body).Decode(&items)
 }
@@ -152,6 +159,9 @@ func (c *Client) GetSpeakers() ([]SpeakerInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var speakers []SpeakerInfo
 	return speakers, json.NewDecoder(resp.Body).Decode(&speakers)
 }
@@ -166,6 +176,9 @@ func (c *Client) BrowseLibrary(path string) ([]LibraryEntry, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var result struct {
 		Entries []LibraryEntry `json:"entries"`
 	}
@@ -177,11 +190,14 @@ func (c *Client) BrowseLibrary(path string) ([]LibraryEntry, error) {
 
 // SearchLibrary does a fuzzy library search.
 func (c *Client) SearchLibrary(q string) ([]LibraryEntry, error) {
-	resp, err := c.http.Get(c.addr.Base() + "/library/search?q=" + q)
+	resp, err := c.http.Get(c.addr.Base() + "/library/search?q=" + url.QueryEscape(q))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var items []LibraryEntry
 	return items, json.NewDecoder(resp.Body).Decode(&items)
 }
@@ -193,17 +209,23 @@ func (c *Client) GetAlbums() ([]Album, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var albums []Album
 	return albums, json.NewDecoder(resp.Body).Decode(&albums)
 }
 
 // SearchAlbums does a fuzzy album search.
 func (c *Client) SearchAlbums(q string) ([]Album, error) {
-	resp, err := c.http.Get(c.addr.Base() + "/albums/search?q=" + q)
+	resp, err := c.http.Get(c.addr.Base() + "/albums/search?q=" + url.QueryEscape(q))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var albums []Album
 	return albums, json.NewDecoder(resp.Body).Decode(&albums)
 }
@@ -215,6 +237,9 @@ func (c *Client) GetAlbumDetail(id string) (*AlbumDetail, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
 	var al AlbumDetail
 	return &al, json.NewDecoder(resp.Body).Decode(&al)
 }
@@ -236,8 +261,8 @@ func (c *Client) post(path string, body any) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	defer resp.Body.Close()
+	return checkResponse(resp)
 }
 
 func (c *Client) Play() error  { return c.post("/play", nil) }
@@ -270,8 +295,8 @@ func (c *Client) DeleteFromQueue(pos int) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	defer resp.Body.Close()
+	return checkResponse(resp)
 }
 
 func (c *Client) ClearQueue() error {
@@ -280,8 +305,8 @@ func (c *Client) ClearQueue() error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	return nil
+	defer resp.Body.Close()
+	return checkResponse(resp)
 }
 
 func (c *Client) ReorderQueue(from, to int) error {
@@ -399,4 +424,15 @@ func ParseFloat(r json.RawMessage) float64 {
 	var v float64
 	json.Unmarshal(r, &v) //nolint:errcheck
 	return v
+}
+
+func checkResponse(resp *http.Response) error {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if len(body) == 0 {
+		return fmt.Errorf("daemon returned %s", resp.Status)
+	}
+	return fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 }

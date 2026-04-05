@@ -14,6 +14,7 @@ type QueueModel struct {
 	PlayingPos   int // 1-based position of currently playing track
 	Width        int
 	Height       int
+	StatusMsg    string
 	ddPending    bool
 	ConfirmClear bool
 }
@@ -70,6 +71,8 @@ func (m *QueueModel) View() string {
 	if m.ConfirmClear {
 		confirm := "  " + ephemeralStyle.Render("Clear entire queue? [y]es / [n]o")
 		b.WriteString(frameLine(confirm, innerW) + "\n")
+	} else if m.StatusMsg != "" {
+		b.WriteString(frameLine("  "+ephemeralStyle.Render(m.StatusMsg), innerW) + "\n")
 	}
 
 	b.WriteString("╰" + strings.Repeat("─", innerW) + "╯")

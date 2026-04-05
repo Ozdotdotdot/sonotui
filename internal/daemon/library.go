@@ -120,7 +120,8 @@ func (l *Library) AlbumByID(id string) (Album, bool) {
 
 // Browse returns directory entries for the given relative path.
 func (l *Library) Browse(relPath string) ([]LibraryEntry, error) {
-	abs := filepath.Join(l.musicRoot, filepath.Clean("/"+relPath))
+	cleanRel := cleanLibraryRelPath(relPath)
+	abs := filepath.Join(l.musicRoot, filepath.FromSlash(cleanRel))
 	entries, err := os.ReadDir(abs)
 	if err != nil {
 		return nil, err
@@ -140,20 +141,19 @@ func (l *Library) Browse(relPath string) ([]LibraryEntry, error) {
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		entryRel := filepath.Join(relPath, name)
-		entryRel = filepath.ToSlash(entryRel)
+		entryRel := joinLibraryRelPath(cleanRel, name)
 
 		if e.IsDir() {
 			result = append(result, LibraryEntry{
 				Name: name,
 				Type: "dir",
-				Path: "/" + entryRel,
+				Path: "/"+entryRel,
 			})
 		} else if isAudioFile(name) {
 			le := LibraryEntry{
 				Name: name,
 				Type: "file",
-				Path: "/" + entryRel,
+				Path: "/"+entryRel,
 			}
 			if t, ok := trackMap[entryRel]; ok {
 				le.Title = t.Title
@@ -178,26 +178,53 @@ func (l *Library) SearchTracks(query string) []LibraryEntry {
 		return nil
 	}
 
-	// Build search corpus: title — artist — album
-	corpus := make([]string, len(tracks))
-	for i, t := range tracks {
-		corpus[i] = t.Title + " " + t.Artist + " " + t.Album
-	}
+	entries := make([]LibraryEntry, 0, len(tracks))
+	corpus := make([]string, 0, len(tracks))
+	seenDirs := make(map[string]struct{})
 
-	matches := fuzzy.Find(query, corpus)
-	var result []LibraryEntry
-	for _, m := range matches {
-		t := tracks[m.Index]
-		result = append(result, LibraryEntry{
+	for _, t := range tracks {
+		dir := filepath.ToSlash(filepath.Dir(t.Path))
+		for dir != "." && dir != "" {
+			if _, ok := seenDirs[dir]; ok {
+				break
+			}
+			seenDirs[dir] = struct{}{}
+			entries = append(entries, LibraryEntry{
+				Name: filepath.Base(dir),
+				Type: "dir",
+				Path: "/"+dir,
+			})
+			corpus = append(corpus, dir+" "+filepath.Base(dir))
+			next := filepath.ToSlash(filepath.Dir(dir))
+			if next == dir {
+				break
+			}
+			dir = next
+		}
+
+		entries = append(entries, LibraryEntry{
 			Name:     filepath.Base(t.Path),
 			Type:     "file",
-			Path:     "/" + filepath.ToSlash(t.Path),
+			Path:     "/"+filepath.ToSlash(t.Path),
 			Title:    t.Title,
 			Artist:   t.Artist,
 			Album:    t.Album,
 			Duration: t.Duration,
 			ArtHash:  t.ArtHash,
 		})
+		corpus = append(corpus, strings.Join([]string{
+			t.Title,
+			t.Artist,
+			t.Album,
+			filepath.ToSlash(t.Path),
+			filepath.Base(filepath.Dir(t.Path)),
+		}, " "))
+	}
+
+	matches := fuzzy.Find(query, corpus)
+	var result []LibraryEntry
+	for _, m := range matches {
+		result = append(result, entries[m.Index])
 	}
 	return result
 }
@@ -229,7 +256,7 @@ func (l *Library) SearchAlbums(query string) []Album {
 func (l *Library) TrackByPath(relPath string) (Track, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	clean := strings.TrimPrefix(filepath.ToSlash(relPath), "/")
+	clean := cleanLibraryRelPath(relPath)
 	for _, t := range l.tracks {
 		if t.Path == clean {
 			return t, true
@@ -242,7 +269,7 @@ func (l *Library) TrackByPath(relPath string) (Track, bool) {
 func (l *Library) TracksInDir(relDir string) []Track {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	prefix := strings.TrimPrefix(filepath.ToSlash(relDir), "/")
+	prefix := cleanLibraryRelPath(relDir)
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
@@ -397,6 +424,22 @@ func readTrack(musicRoot, absPath string) (Track, []byte) {
 func artHash(data []byte) string {
 	h := sha1.Sum(data)
 	return fmt.Sprintf("%x", h[:8])
+}
+
+func cleanLibraryRelPath(relPath string) string {
+	clean := filepath.ToSlash(filepath.Clean("/" + relPath))
+	clean = strings.TrimPrefix(clean, "/")
+	if clean == "." {
+		return ""
+	}
+	return clean
+}
+
+func joinLibraryRelPath(base, name string) string {
+	if base == "" {
+		return name
+	}
+	return filepath.ToSlash(filepath.Join(base, name))
 }
 
 func isAudioFile(name string) bool {
