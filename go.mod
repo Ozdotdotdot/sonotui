@@ -7,7 +7,9 @@ require (
 	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/bubbletea v1.1.0
 	github.com/charmbracelet/lipgloss v0.13.0
+	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/koron/go-ssdp v0.0.4
+	github.com/sahilm/fuzzy v0.1.1
 )
 
 require (
