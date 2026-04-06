@@ -52,6 +52,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /linein", a.handleLineIn)
 	mux.HandleFunc("POST /volume", a.handleSetVolume)
 	mux.HandleFunc("POST /volume/relative", a.handleRelativeVolume)
+	mux.HandleFunc("POST /seek", a.handleSeek)
 
 	// State + SSE.
 	mux.HandleFunc("GET /status", a.handleStatus)
@@ -169,6 +170,21 @@ func (a *API) handlePrev(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleLineIn(w http.ResponseWriter, r *http.Request) {
 	if err := a.sonos.LineIn(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (a *API) handleSeek(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Seconds int `json:"seconds"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := a.sonos.SeekTo(body.Seconds); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -1523,6 +1523,18 @@ func (sm *SonosManager) Prev() error {
 	return sonosPrevious(ip)
 }
 
+// SeekTo seeks to an absolute position in the current track (seconds).
+func (sm *SonosManager) SeekTo(seconds int) error {
+	ip, _, err := sm.activeSpeakerIP()
+	if err != nil {
+		return err
+	}
+	target := formatDurationHMS(seconds)
+	_, err = soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "Seek",
+		map[string]string{"InstanceID": "0", "Unit": "REL_TIME", "Target": target})
+	return err
+}
+
 func (sm *SonosManager) LineIn() error {
 	ip, uuid, err := sm.activeSpeakerIP()
 	if err != nil {

@@ -301,8 +301,6 @@ btnPlayPause.addEventListener('click', () => {
   post(action).catch(() => {});
 });
 
-// Progress scrubbing — we don't expose a seek endpoint, so just optimistically
-// update the display while scrubbing and snap back on release.
 progressInput.addEventListener('input', () => {
   state.userScrubbing = true;
   const ratio = progressInput.value / 1000;
@@ -311,9 +309,16 @@ progressInput.addEventListener('input', () => {
   elapsedTime.textContent = fmtTime(pos);
 });
 
-progressInput.addEventListener('change', () => {
+progressInput.addEventListener('change', async () => {
+  const ratio = progressInput.value / 1000;
+  const seconds = Math.round(ratio * state.duration);
+  state.elapsed = seconds;
+  state.positionTs = performance.now();
   state.userScrubbing = false;
   updateProgressUI();
+  try {
+    await post('/seek', { seconds });
+  } catch {}
 });
 
 // Volume
