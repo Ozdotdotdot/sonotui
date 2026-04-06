@@ -1245,6 +1245,9 @@ func (sm *SonosManager) pollInitialState(sp Speaker) {
 	}
 	sm.events.Send(evtPosition(elapsed, duration))
 	sm.events.Send(evtVolume(currentVol))
+
+	// Populate the queue in daemon state so GET /queue returns correct data.
+	sm.RefreshQueue()
 }
 
 // SwitchSpeaker switches the active speaker by UUID.
