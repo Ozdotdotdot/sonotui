@@ -69,6 +69,7 @@ pub struct App {
     pub status_msg: String,
     pub status_expiry: Option<Instant>,
     pub g_pending: bool,
+    pub g_pending_expiry: Option<Instant>,
     pub should_quit: bool,
 
     // Command line
@@ -99,6 +100,7 @@ pub struct QueueState {
     pub items: Vec<QueueItem>,
     pub cursor: usize,
     pub dd_pending: bool,
+    pub dd_pending_expiry: Option<Instant>,
     pub confirm_clear: bool,
 }
 
@@ -152,6 +154,7 @@ impl App {
             status_msg: String::new(),
             status_expiry: None,
             g_pending: false,
+            g_pending_expiry: None,
             should_quit: false,
             cmd_input: String::new(),
             art_url: String::new(),
@@ -160,6 +163,7 @@ impl App {
                 items: Vec::new(),
                 cursor: 0,
                 dd_pending: false,
+                dd_pending_expiry: None,
                 confirm_clear: false,
             },
             library: LibraryState {
@@ -197,6 +201,41 @@ impl App {
             if Instant::now() >= expiry {
                 self.status_msg.clear();
                 self.status_expiry = None;
+            }
+        }
+    }
+
+    pub fn set_g_pending(&mut self) {
+        self.g_pending = true;
+        self.g_pending_expiry = Some(Instant::now() + std::time::Duration::from_secs(2));
+    }
+
+    pub fn clear_g_pending(&mut self) {
+        self.g_pending = false;
+        self.g_pending_expiry = None;
+    }
+
+    pub fn set_dd_pending(&mut self) {
+        self.queue.dd_pending = true;
+        self.queue.dd_pending_expiry = Some(Instant::now() + std::time::Duration::from_secs(3));
+    }
+
+    pub fn clear_dd_pending(&mut self) {
+        self.queue.dd_pending = false;
+        self.queue.dd_pending_expiry = None;
+    }
+
+    pub fn clear_expired_pending(&mut self) {
+        if let Some(expiry) = self.g_pending_expiry {
+            if Instant::now() >= expiry {
+                self.g_pending = false;
+                self.g_pending_expiry = None;
+            }
+        }
+        if let Some(expiry) = self.queue.dd_pending_expiry {
+            if Instant::now() >= expiry {
+                self.queue.dd_pending = false;
+                self.queue.dd_pending_expiry = None;
             }
         }
     }

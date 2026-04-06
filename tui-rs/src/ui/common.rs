@@ -86,8 +86,10 @@ pub fn render_command_line(f: &mut Frame, area: Rect, app: &App) {
             f.render_widget(Paragraph::new(line).style(base), area);
         }
         InputMode::Normal => {
-            let text = if app.status_msg.is_empty() {
-                "Ready".to_string()
+            let text = if app.g_pending {
+                "g─".to_string()
+            } else if app.status_msg.is_empty() {
+                "? for help".to_string()
             } else {
                 app.status_msg.clone()
             };
@@ -151,8 +153,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         line("space play/pause"),
         line("s stop"),
         line("</> previous/next"),
-        line("j/k volume on Now Playing"),
-        line("J/K fine volume on Now Playing"),
+        line("[/] volume down/up"),
         line("tab cycle speaker"),
         line("l switch to line-in"),
         line(": command line"),
@@ -167,29 +168,34 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
                 "Now Playing",
                 theme::title_style(),
             )));
-            lines.push(line("Album art is rendered directly to the terminal"));
+            lines.push(line("j/k or arrow keys do nothing here"));
+            lines.push(line("use [/] to adjust volume from any tab"));
         }
         Tab::Queue => {
             lines.push(Line::from(Span::styled("Queue", theme::title_style())));
+            lines.push(line("j/k or arrows navigate"));
             lines.push(line("p play from cursor"));
             lines.push(line("dd delete item"));
             lines.push(line("D clear queue"));
             lines.push(line("J/K reorder"));
+            lines.push(line("gg/G top/bottom"));
         }
         Tab::Library => {
             lines.push(Line::from(Span::styled("Library", theme::title_style())));
+            lines.push(line("j/k or arrows navigate"));
             lines.push(line("left/right move between columns"));
-            lines.push(line("enter add track or enter directory column"));
+            lines.push(line("enter add track or enter directory"));
             lines.push(line("a add selection"));
             lines.push(line("A add all files in current column"));
             lines.push(line("/ search"));
         }
         Tab::Albums => {
             lines.push(Line::from(Span::styled("Albums", theme::title_style())));
+            lines.push(line("j/k or arrows navigate"));
             lines.push(line("hovered album previews tracks"));
-            lines.push(line("enter add previewed album"));
-            lines.push(line("a add album"));
+            lines.push(line("enter / a add previewed album to queue"));
             lines.push(line("/ search"));
+            lines.push(line(":rescan rescan library"));
         }
     }
 

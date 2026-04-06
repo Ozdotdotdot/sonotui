@@ -351,8 +351,13 @@ fn process_event(
     match event {
         AppEvent::Tick => {
             let had_status = app.status_expiry.is_some();
+            let had_pending = app.g_pending || app.queue.dd_pending;
             app.clear_expired_status();
+            app.clear_expired_pending();
             if had_status && app.status_expiry.is_none() {
+                *render_wanted = true;
+            }
+            if had_pending && !app.g_pending && !app.queue.dd_pending {
                 *render_wanted = true;
             }
             if app.transport == "PLAYING" {
@@ -424,7 +429,7 @@ fn process_event(
         AppEvent::QueueCleared => {
             app.queue.items.clear();
             app.queue.cursor = 0;
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
             app.queue.confirm_clear = false;
             app.set_status("Queue cleared");
             *render_wanted = true;
@@ -668,33 +673,33 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
         }
         KeyCode::Char('?') => {
             app.help_active = true;
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char(':') => {
             app.input_mode = InputMode::Command;
             app.cmd_input.clear();
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char('1') => {
             app.active_tab = Tab::NowPlaying;
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char('2') => {
             app.active_tab = Tab::Queue;
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char('3') => {
             app.active_tab = Tab::Library;
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char('4') => {
             app.active_tab = Tab::Albums;
-            app.g_pending = false;
+            app.clear_g_pending();
             if app.library_ready && app.albums.albums.is_empty() {
                 spawn_albums_load(handle, client.clone(), tx.clone());
             }
@@ -714,26 +719,26 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
                     Tab::Albums => app.albums.cursor = 0,
                     Tab::NowPlaying => {}
                 }
-                app.g_pending = false;
+                app.clear_g_pending();
             } else {
-                app.g_pending = true;
+                app.set_g_pending();
             }
             return;
         }
         KeyCode::Char('t') if app.g_pending => {
             app.active_tab = app.active_tab.next();
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         KeyCode::Char('T') if app.g_pending => {
             app.active_tab = app.active_tab.prev();
-            app.g_pending = false;
+            app.clear_g_pending();
             return;
         }
         _ => {}
     }
 
-    app.g_pending = false;
+    app.clear_g_pending();
 
     match key.code {
         KeyCode::Char(' ') => {
@@ -760,6 +765,8 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::Next)
         }
         KeyCode::Char('l') => spawn_simple(handle, client.clone(), tx.clone(), SimpleAction::LineIn),
+        KeyCode::Char('[') => spawn_volume(handle, client.clone(), tx.clone(), -5),
+        KeyCode::Char(']') => spawn_volume(handle, client.clone(), tx.clone(), 5),
         KeyCode::Tab => {
             if let Some(uuid) = app.cycle_speaker() {
                 spawn_set_speaker(handle, client.clone(), tx.clone(), uuid);
@@ -774,14 +781,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
     }
 }
 
-fn handle_now_playing_key(key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
-    match key.code {
-        KeyCode::Char('k') | KeyCode::Up => spawn_volume(handle, client.clone(), tx.clone(), 5),
-        KeyCode::Char('j') | KeyCode::Down => spawn_volume(handle, client.clone(), tx.clone(), -5),
-        KeyCode::Char('K') => spawn_volume(handle, client.clone(), tx.clone(), 1),
-        KeyCode::Char('J') => spawn_volume(handle, client.clone(), tx.clone(), -1),
-        _ => {}
-    }
+fn handle_now_playing_key(_key: KeyEvent, _tx: &Sender<AppEvent>, _client: &DaemonClient, _handle: &Handle) {
 }
 
 fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
@@ -802,28 +802,28 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
     match key.code {
         KeyCode::Char('k') | KeyCode::Up => {
             app.queue.cursor = app.queue.cursor.saturating_sub(1);
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.queue.cursor + 1 < app.queue.items.len() {
                 app.queue.cursor += 1;
             }
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let delta = page_size();
             app.queue.cursor = app.queue.cursor.saturating_sub(delta / 2);
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let delta = page_size();
             app.queue.cursor =
                 (app.queue.cursor + delta / 2).min(app.queue.items.len().saturating_sub(1));
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
         }
         KeyCode::Char('G') => {
             app.queue.cursor = app.queue.items.len().saturating_sub(1);
-            app.queue.dd_pending = false;
+            app.clear_dd_pending();
         }
         KeyCode::Char('p') => {
             if let Some(pos) = queue_position(app) {
@@ -832,12 +832,12 @@ fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
         }
         KeyCode::Char('d') => {
             if app.queue.dd_pending {
-                app.queue.dd_pending = false;
+                app.clear_dd_pending();
                 if let Some(pos) = queue_position(app) {
                     spawn_queue_delete(handle, client.clone(), tx.clone(), pos);
                 }
             } else {
-                app.queue.dd_pending = true;
+                app.set_dd_pending();
             }
         }
         KeyCode::Char('D') => app.queue.confirm_clear = true,
@@ -1074,13 +1074,10 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
         KeyCode::Char('j') | KeyCode::Down => {
             move_album_cursor(app, tx, client, 1, handle);
         }
-        KeyCode::Char('K') => move_album_cursor(app, tx, client, -1, handle),
-        KeyCode::Char('J') => move_album_cursor(app, tx, client, 1, handle),
         KeyCode::Char('G') => {
             app.albums.cursor = visible_albums(app).len().saturating_sub(1);
             queue_album_preview(tx, client, app, handle);
         }
-        KeyCode::Esc => {}
         KeyCode::Enter => {
             let paths: Vec<String> = app
                 .albums
@@ -1109,7 +1106,6 @@ fn handle_album_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client:
             app.albums.search_results.clear();
             app.input_mode = InputMode::Search;
         }
-        KeyCode::Char('r') => app.set_status("Rescanning library…"),
         _ => {}
     }
 }
