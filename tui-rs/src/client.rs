@@ -288,6 +288,10 @@ impl DaemonClient {
         self.post_empty("/library/rescan").await
     }
 
+    pub async fn reconnect(&self) -> Result<()> {
+        self.post_empty("/reconnect").await
+    }
+
     pub async fn play(&self) -> Result<()> {
         self.post_empty("/play").await
     }

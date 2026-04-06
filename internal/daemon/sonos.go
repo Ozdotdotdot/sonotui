@@ -334,6 +334,19 @@ func sonosSetVolume(ip string, vol int) error {
 	return err
 }
 
+func sonosGetTransportInfo(ip string) (string, error) {
+	raw, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "GetTransportInfo",
+		map[string]string{"InstanceID": "0"})
+	if err != nil {
+		return "", err
+	}
+	state := parseSOAPField(raw, "CurrentTransportState")
+	if state == "" {
+		state = "STOPPED"
+	}
+	return state, nil
+}
+
 func sonosGetVolume(ip string) (int, error) {
 	raw, err := soapCall(ip, renderingPath, renderingService, renderingVersion, "GetVolume",
 		map[string]string{"Channel": "Master", "InstanceID": "0"})
@@ -1126,6 +1139,20 @@ func (sm *SonosManager) Rediscover() {
 	go sm.runDiscovery()
 }
 
+// Reconnect resubscribes to the active speaker and polls its current state.
+// This is the manual equivalent of what the watchdog does every 4 minutes —
+// useful after a sleep/wake cycle or any network interruption.
+func (sm *SonosManager) Reconnect() error {
+	sm.state.RLock()
+	sp := sm.state.ActiveSpeaker
+	sm.state.RUnlock()
+	if sp == nil {
+		return fmt.Errorf("no active speaker")
+	}
+	sm.subscribeToSpeaker(*sp)
+	return nil
+}
+
 func (sm *SonosManager) subscribeToSpeaker(sp Speaker) {
 	// Unsubscribe from previous.
 	sm.subsMu.Lock()
@@ -1163,6 +1190,61 @@ func (sm *SonosManager) subscribeToSpeaker(sp Speaker) {
 	sm.subsMu.Lock()
 	sm.subs = newSubs
 	sm.subsMu.Unlock()
+
+	go sm.pollInitialState(sp)
+}
+
+// pollInitialState fetches the speaker's current transport, position, and
+// volume via SOAP immediately after subscribing. This gives the daemon
+// accurate state right away without waiting for Sonos to push a GENA event.
+func (sm *SonosManager) pollInitialState(sp Speaker) {
+	transport, err := sonosGetTransportInfo(sp.IP)
+	if err != nil {
+		log.Printf("pollInitialState: GetTransportInfo: %v", err)
+	}
+
+	pos, err := sonosGetPositionInfo(sp.IP)
+	if err != nil {
+		log.Printf("pollInitialState: GetPositionInfo: %v", err)
+	}
+
+	vol, err := sonosGetVolume(sp.IP)
+	if err != nil {
+		log.Printf("pollInitialState: GetVolume: %v", err)
+	}
+
+	sm.state.Lock()
+	if transport != "" {
+		sm.state.Transport = transport
+		sm.state.Playing = transport == "PLAYING"
+	}
+	if pos.Elapsed > 0 || pos.Duration > 0 {
+		sm.state.Elapsed = pos.Elapsed
+		sm.state.Duration = pos.Duration
+	}
+	if pos.Track.URI != "" {
+		sm.state.Track = sm.enrichTrackInfo(pos.Track)
+	}
+	if vol > 0 {
+		sm.state.Volume = vol
+	}
+	sm.state.Unlock()
+
+	// Broadcast the freshly polled state to any connected SSE clients.
+	sm.state.RLock()
+	t := sm.state.Track
+	elapsed := sm.state.Elapsed
+	duration := sm.state.Duration
+	currentTransport := sm.state.Transport
+	currentVol := sm.state.Volume
+	sm.state.RUnlock()
+
+	sm.events.Send(evtTransport(currentTransport))
+	if t.URI != "" {
+		sm.events.Send(evtTrack(t))
+	}
+	sm.events.Send(evtPosition(elapsed, duration))
+	sm.events.Send(evtVolume(currentVol))
 }
 
 // SwitchSpeaker switches the active speaker by UUID.

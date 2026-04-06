@@ -1244,6 +1244,16 @@ fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &Daemon
                 }
             });
         }
+        "reconnect" => {
+            app.set_status("Reconnecting…");
+            spawn_task(handle, tx.clone(), {
+                let c = client.clone();
+                async move {
+                    c.reconnect().await?;
+                    Ok(AppEvent::Status("Reconnected".to_string()))
+                }
+            });
+        }
         "speaker" | "room" => {
             if parts.len() > 1 {
                 let needle = parts[1..].join(" ").to_lowercase();

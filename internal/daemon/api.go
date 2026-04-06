@@ -53,6 +53,7 @@ func (a *API) Handler() http.Handler {
 	// Speakers.
 	mux.HandleFunc("GET /speakers", a.handleGetSpeakers)
 	mux.HandleFunc("POST /speakers/active", a.handleSetActiveSpeaker)
+	mux.HandleFunc("POST /reconnect", a.handleReconnect)
 
 	// Queue.
 	mux.HandleFunc("GET /queue", a.handleGetQueue)
@@ -225,6 +226,14 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleGetSpeakers(w http.ResponseWriter, r *http.Request) {
 	snap := a.state.Snapshot()
 	writeJSON(w, snap.Speakers)
+}
+
+func (a *API) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	if err := a.sonos.Reconnect(); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (a *API) handleSetActiveSpeaker(w http.ResponseWriter, r *http.Request) {
