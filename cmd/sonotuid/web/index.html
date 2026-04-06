@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Sonotui">
+  <meta name="theme-color" content="#0a0a0a">
+  <title>Sonotui</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="bg-art" id="bg-art"></div>
+
+  <div class="app">
+
+    <!-- ── Now Playing ── -->
+    <div class="panel" id="panel-nowplaying">
+      <div class="np-scroll">
+        <div class="art-wrap">
+          <img id="art" src="" alt="Album art" />
+          <div class="art-placeholder" id="art-placeholder">♫</div>
+        </div>
+
+        <div class="meta">
+          <div class="track-title" id="track-title">—</div>
+          <div class="track-sub" id="track-sub"></div>
+        </div>
+
+        <div class="progress-wrap">
+          <div class="progress-times">
+            <span id="elapsed-time">0:00</span>
+            <span id="total-time">0:00</span>
+          </div>
+          <div class="progress-bar-track" id="progress-track">
+            <div class="progress-bar-fill" id="progress-fill"></div>
+            <input type="range" id="progress-input" min="0" max="1000" value="0" step="1">
+          </div>
+        </div>
+
+        <div class="transport">
+          <button class="transport-btn" id="btn-prev" aria-label="Previous">
+            <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+          </button>
+          <button class="transport-btn play-btn" id="btn-playpause" aria-label="Play/Pause">
+            <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="icon-pause hidden" viewBox="0 0 24 24"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+          </button>
+          <button class="transport-btn" id="btn-next" aria-label="Next">
+            <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zm2-8.14 5.51 2.14L8 14.14V9.86zM16 6h2v12h-2z"/></svg>
+          </button>
+        </div>
+
+        <div class="volume-wrap">
+          <svg class="vol-icon" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+          <input type="range" id="volume-input" min="0" max="100" value="50" step="1">
+          <svg class="vol-icon" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Queue ── -->
+    <div class="panel hidden" id="panel-queue">
+      <div class="panel-header">Queue</div>
+      <div class="queue-list" id="queue-list">
+        <div class="empty-state">Queue is empty</div>
+      </div>
+    </div>
+
+    <!-- ── Speaker ── -->
+    <div class="panel hidden" id="panel-speaker">
+      <div class="panel-header">Speaker</div>
+      <div class="speaker-current" id="speaker-current">—</div>
+      <div class="speaker-list" id="speaker-list"></div>
+    </div>
+
+    <!-- ── Tab Bar ── -->
+    <nav class="tab-bar">
+      <button class="tab-btn active" data-tab="nowplaying">
+        <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+        <span>Now Playing</span>
+      </button>
+      <button class="tab-btn" data-tab="queue">
+        <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+        <span>Queue</span>
+      </button>
+      <button class="tab-btn" data-tab="speaker">
+        <svg viewBox="0 0 24 24"><path d="M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-5 18c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm5-4H7V4h10v12z"/></svg>
+        <span>Speaker</span>
+      </button>
+    </nav>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

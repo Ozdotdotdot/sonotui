@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"embed"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +19,9 @@ import (
 
 	"github.com/ozdotdotdot/sonotui/internal/daemon"
 )
+
+//go:embed web
+var webFS embed.FS
 
 // Config holds the daemon configuration.
 type Config struct {
@@ -192,6 +197,11 @@ func main() {
 
 	// REST API on :8989.
 	api := daemon.NewAPI(state, events, sonosMgr, lib, cfg.LanIP, cfg.FilePort)
+	if subFS, err := fs.Sub(webFS, "web"); err == nil {
+		api.SetWebFS(subFS)
+	} else {
+		log.Printf("warning: could not attach web UI: %v", err)
+	}
 	apiServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.APIPort),
 		Handler: api.Handler(),

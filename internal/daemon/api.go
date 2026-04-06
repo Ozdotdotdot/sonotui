@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -12,12 +13,18 @@ import (
 
 // API handles the REST API for the daemon on :8989.
 type API struct {
-	state   *State
-	events  *Broadcaster
-	sonos   *SonosManager
-	lib     *Library
-	lanIP   string
+	state    *State
+	events   *Broadcaster
+	sonos    *SonosManager
+	lib      *Library
+	lanIP    string
 	filePort int
+	webFS    fs.FS
+}
+
+// SetWebFS attaches an embedded filesystem to serve the web UI at / and /static/.
+func (a *API) SetWebFS(fsys fs.FS) {
+	a.webFS = fsys
 }
 
 // NewAPI creates an API handler.
@@ -79,7 +86,24 @@ func (a *API) Handler() http.Handler {
 	// Art (served by fileserver on :8990, but also proxied here for TUI convenience).
 	mux.HandleFunc("GET /art/", a.handleArt)
 
+	// Web UI — only registered when an embedded filesystem is provided.
+	if a.webFS != nil {
+		fileServer := http.FileServer(http.FS(a.webFS))
+		mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
+		mux.HandleFunc("/", a.handleWebUI)
+	}
+
 	return mux
+}
+
+func (a *API) handleWebUI(w http.ResponseWriter, r *http.Request) {
+	data, err := fs.ReadFile(a.webFS, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(data) //nolint:errcheck
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
