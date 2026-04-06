@@ -1536,17 +1536,55 @@ fn spawn_art_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, u
 fn spawn_sse(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
     let handle = handle.clone();
     std::thread::spawn(move || {
-        let (evt_tx, evt_rx) = mpsc::channel();
-        let bridge_tx = tx.clone();
-        std::thread::spawn(move || {
-            while let Ok(evt) = evt_rx.recv() {
-                if bridge_tx.send(AppEvent::Sse(evt)).is_err() {
-                    break;
+        let mut backoff = Duration::from_secs(1);
+        let mut first = true;
+
+        loop {
+            if !first {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+
+                // Re-fetch status on reconnect so the TUI state is accurate.
+                // (First connection is handled by AppEvent::Connected.)
+                let c = client.clone();
+                let t = tx.clone();
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    if let Ok(status) = h.block_on(c.status()) {
+                        let _ = t.send(AppEvent::StatusRefresh(status));
+                    }
+                });
+            }
+            first = false;
+
+            let (evt_tx, evt_rx) = mpsc::channel();
+            let bridge_tx = tx.clone();
+            std::thread::spawn(move || {
+                while let Ok(evt) = evt_rx.recv() {
+                    if bridge_tx.send(AppEvent::Sse(evt)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let connected_at = Instant::now();
+            match handle.block_on(client.stream_events(evt_tx)) {
+                Ok(()) => {
+                    // Clean disconnect (daemon restarted). Reset backoff if we
+                    // were connected long enough to consider it a real session.
+                    if connected_at.elapsed() > Duration::from_secs(5) {
+                        backoff = Duration::from_secs(1);
+                    }
+                }
+                Err(err) => {
+                    if tx
+                        .send(AppEvent::Error(format!("SSE lost ({err}), reconnecting…")))
+                        .is_err()
+                    {
+                        break; // main channel closed, app is quitting
+                    }
                 }
             }
-        });
-        if let Err(err) = handle.block_on(client.stream_events(evt_tx)) {
-            let _ = tx.send(AppEvent::Error(format!("SSE error: {err}")));
         }
     });
 }

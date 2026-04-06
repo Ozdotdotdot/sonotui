@@ -1051,7 +1051,28 @@ func (sm *SonosManager) Start() error {
 	go sm.processGENAEvents()
 	go sm.runDiscovery()
 	go sm.runPositionBroadcast()
+	go sm.runResubscribeWatchdog()
 	return nil
+}
+
+// runResubscribeWatchdog resubscribes to the active speaker every 4 minutes.
+// This recovers from sleep/wake cycles where the network went down and Sonos
+// dropped the GENA subscription, leaving the daemon with stale state.
+// Resubscribing causes Sonos to immediately send its current state as the
+// first GENA notification, which updates transport/track/volume in the daemon.
+func (sm *SonosManager) runResubscribeWatchdog() {
+	ticker := time.NewTicker(4 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		sm.state.RLock()
+		sp := sm.state.ActiveSpeaker
+		sm.state.RUnlock()
+		if sp == nil {
+			continue
+		}
+		log.Printf("watchdog: resubscribing to speaker %q", sp.Name)
+		sm.subscribeToSpeaker(*sp)
+	}
 }
 
 // Shutdown unsubscribes and stops background listener resources.
