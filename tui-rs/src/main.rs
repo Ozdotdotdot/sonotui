@@ -1234,7 +1234,16 @@ fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &Daemon
     match parts[0] {
         "q" | "quit" => app.should_quit = true,
         "help" => app.help_active = true,
-        "rescan" => app.set_status("Rescanning library…"),
+        "rescan" => {
+            app.set_status("Rescanning library…");
+            spawn_task(handle, tx.clone(), {
+                let c = client.clone();
+                async move {
+                    c.rescan().await?;
+                    Ok(AppEvent::Status("Rescan started".to_string()))
+                }
+            });
+        }
         "speaker" | "room" => {
             if parts.len() > 1 {
                 let needle = parts[1..].join(" ").to_lowercase();

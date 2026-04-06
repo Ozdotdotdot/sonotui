@@ -66,6 +66,7 @@ func (a *API) Handler() http.Handler {
 
 	// Library.
 	mux.HandleFunc("GET /library", a.handleLibraryRoot)
+	mux.HandleFunc("POST /library/rescan", a.handleLibraryRescan)
 	mux.HandleFunc("GET /library/search", a.handleLibrarySearch)
 	mux.HandleFunc("/library/", a.handleLibraryPath)
 
@@ -367,6 +368,14 @@ func (a *API) handleBatchQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────
+
+func (a *API) handleLibraryRescan(w http.ResponseWriter, r *http.Request) {
+	if started := a.lib.Scan(a.events); !started {
+		writeJSON(w, map[string]any{"status": "already_scanning"})
+		return
+	}
+	writeJSON(w, map[string]any{"status": "started"})
+}
 
 func (a *API) handleLibraryRoot(w http.ResponseWriter, r *http.Request) {
 	entries, err := a.lib.Browse("/")

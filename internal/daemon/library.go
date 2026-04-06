@@ -65,6 +65,7 @@ type Library struct {
 	albums    []Album
 	art       map[string][]byte // hash → raw JPEG bytes
 	ready     bool
+	scanning  bool
 }
 
 var (
@@ -310,7 +311,16 @@ type libraryCache struct {
 
 // Scan scans the music root, calling progressFn with (scanned, total).
 // Sends library_scan SSE events via the broadcaster.
-func (l *Library) Scan(events *Broadcaster) {
+// Returns false without doing anything if a scan is already running.
+func (l *Library) Scan(events *Broadcaster) bool {
+	l.mu.Lock()
+	if l.scanning {
+		l.mu.Unlock()
+		return false
+	}
+	l.scanning = true
+	l.mu.Unlock()
+
 	events.Send(evtLibraryScan("scanning", nil))
 
 	// Try loading cache first for instant availability.
@@ -327,6 +337,12 @@ func (l *Library) Scan(events *Broadcaster) {
 
 	// Full scan in background.
 	go func() {
+		defer func() {
+			l.mu.Lock()
+			l.scanning = false
+			l.mu.Unlock()
+		}()
+
 		tracks, artMap, err := l.fullScan(events)
 		if err != nil {
 			log.Printf("library scan error: %v", err)
@@ -345,6 +361,7 @@ func (l *Library) Scan(events *Broadcaster) {
 		events.Send(evtLibraryScan("done", map[string]any{"track_count": len(tracks)}))
 		l.saveCache(tracks, artMap)
 	}()
+	return true
 }
 
 func (l *Library) fullScan(events *Broadcaster) ([]Track, map[string][]byte, error) {

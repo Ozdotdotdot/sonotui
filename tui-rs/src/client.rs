@@ -284,6 +284,10 @@ impl DaemonClient {
             .context("parse /albums/{id}")
     }
 
+    pub async fn rescan(&self) -> Result<()> {
+        self.post_empty("/library/rescan").await
+    }
+
     pub async fn play(&self) -> Result<()> {
         self.post_empty("/play").await
     }
