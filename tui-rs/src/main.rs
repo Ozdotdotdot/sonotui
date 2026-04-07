@@ -563,12 +563,38 @@ fn process_event(
                         }
                     }
                 }
-                MouseEventKind::ScrollUp => {
-                    spawn_volume(handle, client.clone(), tx.clone(), 2);
-                }
-                MouseEventKind::ScrollDown => {
-                    spawn_volume(handle, client.clone(), tx.clone(), -2);
-                }
+                MouseEventKind::ScrollUp => match app.active_tab {
+                    Tab::NowPlaying => spawn_volume(handle, client.clone(), tx.clone(), 2),
+                    Tab::Queue => {
+                        app.queue.cursor = app.queue.cursor.saturating_sub(1);
+                        *render_wanted = true;
+                    }
+                    Tab::Library => {
+                        move_library_cursor(app, tx, client, -1, handle);
+                        *render_wanted = true;
+                    }
+                    Tab::Albums => {
+                        move_album_cursor(app, tx, client, -1, handle);
+                        *render_wanted = true;
+                    }
+                },
+                MouseEventKind::ScrollDown => match app.active_tab {
+                    Tab::NowPlaying => spawn_volume(handle, client.clone(), tx.clone(), -2),
+                    Tab::Queue => {
+                        if app.queue.cursor + 1 < app.queue.items.len() {
+                            app.queue.cursor += 1;
+                        }
+                        *render_wanted = true;
+                    }
+                    Tab::Library => {
+                        move_library_cursor(app, tx, client, 1, handle);
+                        *render_wanted = true;
+                    }
+                    Tab::Albums => {
+                        move_album_cursor(app, tx, client, 1, handle);
+                        *render_wanted = true;
+                    }
+                },
                 _ => {}
             }
         }
