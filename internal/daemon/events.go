@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // SSEEvent is a single event sent over the SSE stream.
@@ -75,6 +76,9 @@ func (b *Broadcaster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ch := b.Subscribe()
 	defer b.Unsubscribe(ch)
 
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
@@ -82,6 +86,9 @@ func (b *Broadcaster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		case evt := <-ch:
 			fmt.Fprintf(w, "data: %s\n\n", evt.data)
+			flusher.Flush()
+		case <-ticker.C:
+			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		}
 	}

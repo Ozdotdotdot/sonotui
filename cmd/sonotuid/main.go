@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/grandcat/zeroconf"
 	"github.com/ozdotdotdot/sonotui/internal/daemon"
 )
 
@@ -31,6 +32,7 @@ type Config struct {
 	LibraryPath      string
 	CachePath        string
 	PreferredSpeaker string
+	DisplayName      string
 }
 
 func defaultConfig() Config {
@@ -82,6 +84,8 @@ func loadConfig(path string) Config {
 			cfg.CachePath = expandHome(v)
 		case "sonos.preferred_speaker":
 			cfg.PreferredSpeaker = v
+		case "server.display_name":
+			cfg.DisplayName = v
 		}
 	}
 	return cfg
@@ -224,6 +228,19 @@ func main() {
 			log.Printf("api server error: %v", err)
 		}
 	}()
+
+	// mDNS/Bonjour advertisement so iOS (and other mDNS clients) can discover the daemon.
+	mdnsName := cfg.DisplayName
+	if mdnsName == "" {
+		mdnsName, _ = os.Hostname()
+	}
+	mdnsSrv, err := zeroconf.Register(mdnsName, "_sonogui._tcp", "local.", cfg.APIPort, []string{"version=1"}, nil)
+	if err != nil {
+		log.Printf("mDNS advertisement failed (non-fatal): %v", err)
+	} else {
+		log.Printf("mDNS: advertising %q on port %d", mdnsName, cfg.APIPort)
+		defer mdnsSrv.Shutdown()
+	}
 
 	// Start Sonos manager (discovery + GENA).
 	if err := sonosMgr.Start(); err != nil {
