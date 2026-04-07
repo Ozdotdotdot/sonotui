@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 
@@ -9,9 +12,20 @@ pub struct DaemonInfo {
     pub port: u16,
 }
 
+/// Returns true if a dotted-decimal IPv4 string falls in Tailscale's CGNAT
+/// range (100.64.0.0/10).
+fn is_tailscale_str(ip: &str) -> bool {
+    let mut parts = ip.split('.');
+    let a: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let b: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    a == 100 && (64..=127).contains(&b)
+}
+
 /// Browse for `_sonogui._tcp` services for up to `timeout`.
-/// Returns all resolved instances. Errors are silently swallowed — discovery
-/// is best-effort and the caller falls back gracefully.
+///
+/// Deduplicates by mDNS fullname: the same daemon advertising on multiple
+/// interfaces (LAN + Tailscale) collapses to one entry, preferring the LAN
+/// address over the Tailscale 100.x.x.x address.
 pub fn discover(timeout: Duration) -> Vec<DaemonInfo> {
     let Ok(mdns) = ServiceDaemon::new() else {
         return vec![];
@@ -22,36 +36,49 @@ pub fn discover(timeout: Duration) -> Vec<DaemonInfo> {
     };
 
     let deadline = Instant::now() + timeout;
-    let mut found = vec![];
+    // Key: mDNS fullname (unique on the LAN — safe dedup key).
+    let mut found: HashMap<String, DaemonInfo> = HashMap::new();
 
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let poll = remaining.min(Duration::from_millis(50));
         match recv.recv_timeout(poll) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                // Prefer IPv4; fall back to any address.
-                let addr = info
+                let fullname = info.get_fullname().to_string();
+                let port = info.get_port();
+                let name = fullname
+                    .split('.')
+                    .next()
+                    .unwrap_or(&fullname)
+                    .to_string();
+
+                // Collect addresses as strings; pick best (LAN IPv4 first).
+                let addresses: Vec<String> = info
                     .get_addresses()
                     .iter()
-                    .find(|a| a.is_ipv4())
-                    .or_else(|| info.get_addresses().iter().next())
-                    .map(|a| a.to_string());
+                    .filter(|a| a.is_ipv4())
+                    .map(|a| a.to_string())
+                    .collect();
 
-                if let Some(host) = addr {
-                    // Use the human-readable instance name (e.g. "oz-server"), not the
-                    // full DNS name which includes the service type suffix.
-                    let name = info
-                        .get_fullname()
-                        .split('.')
-                        .next()
-                        .unwrap_or(info.get_fullname())
-                        .to_string();
+                let best = addresses
+                    .iter()
+                    .find(|h| !is_tailscale_str(h))
+                    .or_else(|| addresses.first())
+                    .cloned();
 
-                    found.push(DaemonInfo {
-                        name,
-                        host,
-                        port: info.get_port(),
-                    });
+                let Some(best_host) = best else { continue };
+
+                match found.get_mut(&fullname) {
+                    None => {
+                        found.insert(fullname, DaemonInfo { name, host: best_host, port });
+                    }
+                    Some(existing) => {
+                        // Same service seen again (e.g. via a different interface).
+                        // Upgrade from Tailscale to LAN if possible.
+                        if is_tailscale_str(&existing.host) && !is_tailscale_str(&best_host) {
+                            existing.host = best_host;
+                        }
+                    }
                 }
             }
             Ok(_) => {} // SearchStarted, SearchStopped, etc. — ignore
@@ -60,5 +87,5 @@ pub fn discover(timeout: Duration) -> Vec<DaemonInfo> {
     }
 
     let _ = mdns.shutdown();
-    found
+    found.into_values().collect()
 }
