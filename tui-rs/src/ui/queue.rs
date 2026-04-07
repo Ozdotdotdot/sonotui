@@ -17,10 +17,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let artist_w = ((inner.width as usize * 21) / 100).clamp(12, 26);
-    let title_w = ((inner.width as usize * 33) / 100).clamp(16, 34);
-    let album_w = ((inner.width as usize * 30) / 100).clamp(14, 32);
     let duration_w = 8usize.min(inner.width as usize);
+    let remaining = (inner.width as usize).saturating_sub(duration_w + 3 * 2);
+    let artist_w = ((remaining * 25) / 100).max(12);
+    let title_w = ((remaining * 40) / 100).max(16);
+    let album_w = remaining.saturating_sub(artist_w + title_w).max(14);
     let list_height = inner.height.saturating_sub(3) as usize;
     let start = visible_start(app.queue.cursor, list_height, app.queue.items.len());
     let mut lines = Vec::new();
