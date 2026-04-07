@@ -156,7 +156,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         line("[/] volume down/up"),
         line("tab cycle speaker"),
         line("l switch to line-in"),
-        line(": command line"),
+        line(": commands  (rescan, reconnect, speaker)"),
         line("? help"),
         line("q quit"),
         Line::from(""),
@@ -168,12 +168,14 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
                 "Now Playing",
                 theme::title_style(),
             )));
-            lines.push(line("j/k or arrow keys do nothing here"));
-            lines.push(line("use [/] to adjust volume from any tab"));
+            lines.push(line("f / b  seek forward / back 10s"));
+            lines.push(line("click progress bar to seek"));
+            lines.push(line("scroll wheel adjusts volume"));
         }
         Tab::Queue => {
             lines.push(Line::from(Span::styled("Queue", theme::title_style())));
             lines.push(line("j/k or arrows navigate"));
+            lines.push(line("Ctrl+U / Ctrl+D  page up / down"));
             lines.push(line("p play from cursor"));
             lines.push(line("dd delete item"));
             lines.push(line("D clear queue"));
@@ -183,6 +185,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         Tab::Library => {
             lines.push(Line::from(Span::styled("Library", theme::title_style())));
             lines.push(line("j/k or arrows navigate"));
+            lines.push(line("Ctrl+U / Ctrl+D  page up / down"));
             lines.push(line("left/right move between columns"));
             lines.push(line("enter add track or enter directory"));
             lines.push(line("a add selection"));
@@ -195,7 +198,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
             lines.push(line("hovered album previews tracks"));
             lines.push(line("enter / a add previewed album to queue"));
             lines.push(line("/ search"));
-            lines.push(line(":rescan rescan library"));
+            lines.push(line(":rescan  rescan library"));
         }
     }
 

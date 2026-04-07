@@ -192,7 +192,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) -> Option<Rect> {
         theme::CYAN,
     );
 
-    let help = "space play/pause   </> prev/next   [/] volume   tab speaker   ? help";
+    let help = "space play/pause   </> prev/next   f/b seek   [/] volume   tab speaker   ? help";
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(help, theme::help_text()))),
         chunks[8],
