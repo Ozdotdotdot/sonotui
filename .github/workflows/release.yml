@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-daemon:
+    name: Daemon (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" \
+            -o sonotuid-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/sonotuid/
+          tar -czf sonotuid-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.ref_name }}.tar.gz \
+            sonotuid-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonotuid-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: '*.tar.gz'
+
+  build-tui:
+    name: TUI (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu
+            linker: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tui-rs
+
+      - name: Install cross-linker (arm64 Linux)
+        if: matrix.packages != ''
+        run: sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build
+        working-directory: tui-rs
+        run: |
+          ${{ matrix.linker }} cargo build --release --target ${{ matrix.target }}
+          tar -czf sonotui-${{ matrix.target }}-${{ github.ref_name }}.tar.gz \
+            -C target/${{ matrix.target }}/release sonotui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonotui-${{ matrix.target }}
+          path: tui-rs/*.tar.gz
+
+  release:
+    name: Publish Release
+    needs: [build-daemon, build-tui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true

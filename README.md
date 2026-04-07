@@ -1,0 +1,55 @@
+# sonotui
+
+Self-hosted Sonos control — Go daemon + Rust terminal UI with native album art.
+
+<!-- Add a screenshot here once you have one -->
+<!-- ![sonotui](docs/screenshot.png) -->
+
+## Install
+
+**Daemon** — runs on your server (Linux):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ozdotdotdot/sonotui/main/scripts/install.sh | sh
+sonotuid --install   # register as a systemd user service
+```
+
+**TUI** — runs on your daily driver (Linux or macOS):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ozdotdotdot/sonotui/main/scripts/install-tui.sh | sh
+```
+
+Then just run `sonotui`. It finds the daemon automatically.
+
+## How it works
+
+**`sonotuid`** (daemon) runs on a always-on machine. It scans your music library,
+serves tracks and album art over HTTP, and exposes a REST API + real-time SSE event
+stream on port 8989. It also advertises itself via mDNS so clients can find it without
+manual IP configuration.
+
+**`sonotui`** (TUI) connects to the daemon from any terminal. It renders album art
+natively using the Kitty graphics protocol in Kitty and Ghostty, falls back to
+Unicode half-blocks elsewhere. On first launch it scans the LAN for the daemon and
+auto-connects — or shows a picker if it finds more than one.
+
+Both binaries are statically compiled with no runtime dependencies.
+
+## Documentation
+
+- [API Reference](docs/api.md) — all REST endpoints and SSE event types
+- [Configuration](docs/config.md) — config files, CLI flags, discovery behaviour
+- [Contributing](CONTRIBUTING.md) — build setup, dev workflow
+
+## Building from source
+
+```sh
+# Daemon
+go build ./cmd/sonotuid/
+
+# TUI
+cd tui-rs && cargo build --release
+```
+
+Requires Go 1.22+ and Rust stable.
