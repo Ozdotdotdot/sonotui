@@ -56,7 +56,7 @@ preferred_speaker = ""
 |---|---|---|
 | `-config` | `~/.config/sonotuid/config.toml` | Path to config file |
 | `-debug` | `false` | Enable verbose logging with microsecond timestamps |
-| `-install` | `false` | Install a systemd user service and exit. Writes a unit file to `~/.config/systemd/user/sonotuid.service` and runs `systemctl --user enable --now sonotuid`. |
+| `-install` | `false` | Install as a system service and exit. On Linux, writes `~/.config/systemd/user/sonotuid.service` and enables it via systemctl. On macOS, writes `~/Library/LaunchAgents/com.ozdotdotdot.sonotuid.plist` and loads it via launchctl. Logs on macOS go to `/tmp/sonotuid.log`. |
 
 ### mDNS advertisement
 

@@ -7,20 +7,21 @@ Self-hosted Sonos control — Go daemon + Rust terminal UI with native album art
 
 ## Install
 
-**Daemon** — runs on your server (Linux):
+**Daemon** — runs on your server (Linux or macOS):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ozdotdotdot/sonotui/main/scripts/install.sh | sh
-sonotuid --install   # register as a systemd user service
+sonotuid --install   # register as a system service (systemd on Linux, launchd on macOS)
 ```
 
 **TUI** — runs on your daily driver (Linux or macOS):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ozdotdotdot/sonotui/main/scripts/install-tui.sh | sh
+sonotui
 ```
 
-Then just run `sonotui`. It finds the daemon automatically.
+The TUI finds the daemon automatically — no IP addresses to configure.
 
 ## How it works
 

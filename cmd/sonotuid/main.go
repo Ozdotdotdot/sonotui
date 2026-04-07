@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -113,6 +114,57 @@ RestartSec=5
 WantedBy=default.target
 `
 
+func installLaunchd() error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate executable: %w", err)
+	}
+
+	home := os.Getenv("HOME")
+	agentsDir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", agentsDir, err)
+	}
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ozdotdotdot.sonotuid</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>%s</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/sonotuid.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/sonotuid.log</string>
+</dict>
+</plist>
+`, execPath)
+
+	plistPath := filepath.Join(agentsDir, "com.ozdotdotdot.sonotuid.plist")
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+
+	cmd := exec.Command("launchctl", "load", "-w", plistPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+
+	fmt.Println("sonotuid service installed and started.")
+	fmt.Printf("Logs: tail -f /tmp/sonotuid.log\n")
+	return nil
+}
+
 func installSystemd() error {
 	home := os.Getenv("HOME")
 	unitDir := filepath.Join(home, ".config", "systemd", "user")
@@ -141,7 +193,7 @@ func installSystemd() error {
 
 func main() {
 	var (
-		flagInstall = flag.Bool("install", false, "install systemd user service and exit")
+		flagInstall = flag.Bool("install", false, "install as a system service and exit (systemd on Linux, launchd on macOS)")
 		flagConfig  = flag.String("config", "", "path to config file")
 		flagDebug   = flag.Bool("debug", false, "enable debug logging")
 	)
@@ -154,7 +206,17 @@ func main() {
 	}
 
 	if *flagInstall {
-		if err := installSystemd(); err != nil {
+		var err error
+		switch runtime.GOOS {
+		case "darwin":
+			err = installLaunchd()
+		case "linux":
+			err = installSystemd()
+		default:
+			fmt.Fprintf(os.Stderr, "install: unsupported OS %q — set up the service manually\n", runtime.GOOS)
+			os.Exit(1)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "install: %v\n", err)
 			os.Exit(1)
 		}
