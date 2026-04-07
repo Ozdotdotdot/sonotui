@@ -1,6 +1,6 @@
 # sonotui
 
-Self-hosted Sonos control — Go daemon + Rust terminal UI with native album art.
+Self-hosted Sonos control. Go daemon + Rust terminal UI with native album art.
 
 <!-- Add a screenshot here once you have one -->
 <!-- ![sonotui](docs/screenshot.png) -->
