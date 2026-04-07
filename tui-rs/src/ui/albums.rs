@@ -63,23 +63,27 @@ fn render_album_list(f: &mut Frame, area: Rect, app: &App) {
     let start = visible_start(app.albums.cursor, list_height, albums.len());
     let mut lines = Vec::new();
 
+    let w = inner.width as usize;
+    // Reserve 2 chars for marker + space, then split remaining between title (60%) and artist (40%)
+    let content_w = w.saturating_sub(2);
+    let title_w = ((content_w * 60) / 100).max(10);
+    let artist_w = content_w.saturating_sub(title_w + 2).max(6);
+
     for idx in start..(start + list_height).min(albums.len()) {
         let album = &albums[idx];
-        let text = truncate(
-            &format!(
-                "{} {}  {}",
-                if idx == app.albums.cursor { "❯" } else { " " },
-                album.title,
-                album.artist
-            ),
-            inner.width as usize,
-        );
-        let style = if idx == app.albums.cursor {
-            theme::selected_row()
+        let is_selected = idx == app.albums.cursor;
+        let marker = if is_selected { "❯ " } else { "  " };
+        let (title_style, artist_style) = if is_selected {
+            (theme::selected_row(), theme::selected_row())
         } else {
-            theme::secondary_text()
+            (theme::secondary_text(), theme::dim_style())
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(vec![
+            Span::styled(marker, title_style),
+            Span::styled(pad(truncate(&album.title, title_w), title_w), title_style),
+            Span::raw("  "),
+            Span::styled(truncate(&album.artist, artist_w), artist_style),
+        ]));
     }
 
     while lines.len() < inner.height.saturating_sub(1) as usize {
@@ -162,23 +166,26 @@ fn render_album_search(f: &mut Frame, area: Rect, app: &App) {
     let list_height = inner.height.saturating_sub(1) as usize;
     let start = visible_start(app.albums.cursor, list_height, albums.len());
     let mut lines = Vec::new();
+    let w = inner.width as usize;
+    let content_w = w.saturating_sub(2);
+    let title_w = ((content_w * 60) / 100).max(10);
+    let artist_w = content_w.saturating_sub(title_w + 2).max(6);
+
     for idx in start..(start + list_height).min(albums.len()) {
         let album = &albums[idx];
-        let text = truncate(
-            &format!(
-                "{} {}  {}",
-                if idx == app.albums.cursor { "❯" } else { " " },
-                album.title,
-                album.artist
-            ),
-            inner.width as usize,
-        );
-        let style = if idx == app.albums.cursor {
-            theme::selected_row()
+        let is_selected = idx == app.albums.cursor;
+        let marker = if is_selected { "❯ " } else { "  " };
+        let (title_style, artist_style) = if is_selected {
+            (theme::selected_row(), theme::selected_row())
         } else {
-            theme::secondary_text()
+            (theme::secondary_text(), theme::dim_style())
         };
-        lines.push(Line::from(Span::styled(text, style)));
+        lines.push(Line::from(vec![
+            Span::styled(marker, title_style),
+            Span::styled(pad(truncate(&album.title, title_w), title_w), title_style),
+            Span::raw("  "),
+            Span::styled(truncate(&album.artist, artist_w), artist_style),
+        ]));
     }
     while lines.len() < inner.height.saturating_sub(1) as usize {
         lines.push(Line::from(""));
@@ -223,5 +230,14 @@ fn truncate(input: &str, width: usize) -> String {
         let mut out: String = input.chars().take(width - 1).collect();
         out.push('…');
         out
+    }
+}
+
+fn pad(input: String, width: usize) -> String {
+    let len = input.chars().count();
+    if len >= width {
+        input
+    } else {
+        format!("{input}{}", " ".repeat(width - len))
     }
 }

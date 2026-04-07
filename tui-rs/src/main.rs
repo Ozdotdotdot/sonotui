@@ -678,9 +678,7 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
                 app.albums.scan_progress = progress;
             }
             if app.library_ready {
-                if app.albums.albums.is_empty() {
-                    spawn_albums_load(handle, client.clone(), tx.clone());
-                }
+                spawn_albums_load(handle, client.clone(), tx.clone());
                 spawn_library_column_load(
                     handle,
                     client.clone(),

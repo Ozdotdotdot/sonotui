@@ -512,6 +512,18 @@ func isAudioFile(name string) bool {
 	return false
 }
 
+// primaryArtist returns the first artist in a multi-artist string, stripping
+// everything after the first ";", "/", or "&". This prevents featured-artist
+// variants like "Grentperez; Ruel" from creating duplicate album entries.
+func primaryArtist(s string) string {
+	for _, sep := range []string{";", "/"} {
+		if i := strings.Index(s, sep); i >= 0 {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return s
+}
+
 // buildAlbums groups tracks into albums sorted by artist then album.
 func buildAlbums(tracks []Track) []Album {
 	type key struct{ artist, album string }
@@ -522,13 +534,14 @@ func buildAlbums(tracks []Track) []Album {
 		if artist == "" {
 			artist = t.Artist
 		}
-		k := key{artist: artist, album: t.Album}
+		artistKey := primaryArtist(artist)
+		k := key{artist: artistKey, album: t.Album}
 		if m[k] == nil {
-			id := albumID(artist, t.Album)
+			id := albumID(artistKey, t.Album)
 			m[k] = &Album{
 				ID:     id,
 				Title:  t.Album,
-				Artist: artist,
+				Artist: artistKey,
 				Year:   t.Year,
 				Path:   filepath.Dir(t.Path),
 			}
