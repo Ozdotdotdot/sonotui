@@ -1,6 +1,9 @@
 mod app;
 mod client;
+mod config;
+mod discover;
 mod kitty;
+mod picker;
 mod theme;
 mod ui;
 
@@ -36,12 +39,17 @@ use ratatui::{
 #[derive(Parser, Debug)]
 #[command(name = "sonotui")]
 struct Args {
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    #[arg(long, default_value_t = 8989)]
-    port: u16,
+    /// Daemon host — skips mDNS discovery when provided
+    #[arg(long)]
+    host: Option<String>,
+    /// Daemon port — skips mDNS discovery when provided
+    #[arg(long)]
+    port: Option<u16>,
     #[arg(long, default_value = "auto")]
     art: ArtCliMode,
+    /// Skip mDNS discovery and use config/defaults directly
+    #[arg(long)]
+    no_discover: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -139,8 +147,47 @@ const STATUS_POLL_INTERVAL: u32 = 150; // ~30s at 200ms tick
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let client = DaemonClient::new(&args.host, args.port);
     let art_mode = detect_art_mode(args.art);
+
+    // ── Resolve daemon address ────────────────────────────────────────────────
+    //
+    // Priority: explicit CLI flag > saved config > mDNS discovery > built-in default
+    //
+    let cfg = config::load();
+
+    let (host, port) = if let (Some(h), p) = (args.host.as_deref(), args.port) {
+        // User passed --host explicitly: use it directly, skip everything else.
+        (h.to_string(), p.unwrap_or(8989))
+    } else if args.no_discover {
+        // --no-discover: honour config or fall back to localhost.
+        cfg.saved_server().unwrap_or_else(|| ("127.0.0.1".into(), 8989))
+    } else if let Some((h, p)) = cfg.saved_server() {
+        // Config has a previously saved address (written after a picker selection).
+        (h, p)
+    } else {
+        // No saved preference — run a short mDNS scan and pick automatically.
+        let daemons = discover::discover(Duration::from_millis(300));
+        match daemons.len() {
+            0 => ("127.0.0.1".into(), 8989),
+            1 => (daemons[0].host.clone(), daemons[0].port),
+            _ => {
+                // Multiple daemons: show the picker (it needs a live terminal).
+                let mut term = TerminalGuard::new()?;
+                let result = picker::run(&mut term.terminal, &daemons);
+                drop(term); // leave alternate screen before re-entering below
+                match result {
+                    picker::PickerResult::Selected(h, p) => {
+                        config::save_server(&h, p);
+                        (h, p)
+                    }
+                    picker::PickerResult::Quit => return Ok(()),
+                }
+            }
+        }
+    };
+
+    // ── Normal startup ────────────────────────────────────────────────────────
+    let client = DaemonClient::new(&host, port);
     let mut app = App::new(client.clone());
     let (tx, rx) = mpsc::channel();
 
