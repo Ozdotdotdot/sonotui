@@ -80,8 +80,9 @@ pub struct App {
     pub art_url: String,
     pub art_image_data: Option<ArtImageData>,
 
-    // Mouse seek target
+    // Mouse interaction areas
     pub progress_bar_area: Option<Rect>,
+    pub status_area: Option<Rect>,
 
     // Queue tab
     pub queue: QueueState,
@@ -164,6 +165,7 @@ impl App {
             art_url: String::new(),
             art_image_data: None,
             progress_bar_area: None,
+            status_area: None,
             queue: QueueState {
                 items: Vec::new(),
                 cursor: 0,

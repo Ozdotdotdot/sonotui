@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, InputMode, Tab, ALL_TABS};
 use crate::theme;
 
-pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
+pub fn render_header(f: &mut Frame, area: Rect, app: &App) -> Rect {
     let boxes = Layout::horizontal([
         Constraint::Length(26),
         Constraint::Min(24),
@@ -23,6 +23,7 @@ pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
     render_header_left(f, boxes[0], app);
     render_header_center(f, boxes[1], app);
     render_header_right(f, boxes[2], app);
+    boxes[2]
 }
 
 pub fn render_tab_bar(f: &mut Frame, area: Rect, app: &App) {

@@ -257,6 +257,7 @@ fn run_loop(
 
             let mut art_area = None;
             let mut progress_bar_area: Option<Rect> = None;
+            let mut status_area: Option<Rect> = None;
             terminal.draw(|f| {
                 let layout = Layout::vertical([
                     Constraint::Length(3),
@@ -266,7 +267,7 @@ fn run_loop(
                 ])
                 .split(f.area());
 
-                ui::common::render_header(f, layout[0], app);
+                status_area = Some(ui::common::render_header(f, layout[0], app));
                 ui::render_tab_bar(f, layout[1], app);
 
                 if !app.connected {
@@ -287,6 +288,7 @@ fn run_loop(
                 ui::render_help_overlay(f, f.area(), app);
             })?;
             app.progress_bar_area = progress_bar_area;
+            app.status_area = status_area;
 
             // Kick off background Kitty encode if the signature has changed.
             if art_mode == ArtMode::Kitty
@@ -563,38 +565,41 @@ fn process_event(
                         }
                     }
                 }
-                MouseEventKind::ScrollUp => match app.active_tab {
-                    Tab::NowPlaying => spawn_volume(handle, client.clone(), tx.clone(), 2),
-                    Tab::Queue => {
-                        app.queue.cursor = app.queue.cursor.saturating_sub(1);
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let delta = if mouse.kind == MouseEventKind::ScrollUp { 1i32 } else { -1 };
+                    let in_status = app.status_area.map(|a| {
+                        mouse.column >= a.x && mouse.column < a.x + a.width
+                            && mouse.row >= a.y && mouse.row < a.y + a.height
+                    }).unwrap_or(false);
+                    if in_status {
+                        spawn_volume(handle, client.clone(), tx.clone(), delta * 2);
                         *render_wanted = true;
-                    }
-                    Tab::Library => {
-                        move_library_cursor(app, tx, client, -1, handle);
-                        *render_wanted = true;
-                    }
-                    Tab::Albums => {
-                        move_album_cursor(app, tx, client, -1, handle);
-                        *render_wanted = true;
-                    }
-                },
-                MouseEventKind::ScrollDown => match app.active_tab {
-                    Tab::NowPlaying => spawn_volume(handle, client.clone(), tx.clone(), -2),
-                    Tab::Queue => {
-                        if app.queue.cursor + 1 < app.queue.items.len() {
-                            app.queue.cursor += 1;
+                    } else {
+                        match (app.active_tab, delta) {
+                            (Tab::NowPlaying, _) => {
+                                spawn_volume(handle, client.clone(), tx.clone(), delta * 2);
+                            }
+                            (Tab::Queue, 1) => {
+                                app.queue.cursor = app.queue.cursor.saturating_sub(1);
+                                *render_wanted = true;
+                            }
+                            (Tab::Queue, _) => {
+                                if app.queue.cursor + 1 < app.queue.items.len() {
+                                    app.queue.cursor += 1;
+                                }
+                                *render_wanted = true;
+                            }
+                            (Tab::Library, d) => {
+                                move_library_cursor(app, tx, client, -d as isize, handle);
+                                *render_wanted = true;
+                            }
+                            (Tab::Albums, d) => {
+                                move_album_cursor(app, tx, client, -d as isize, handle);
+                                *render_wanted = true;
+                            }
                         }
-                        *render_wanted = true;
                     }
-                    Tab::Library => {
-                        move_library_cursor(app, tx, client, 1, handle);
-                        *render_wanted = true;
-                    }
-                    Tab::Albums => {
-                        move_album_cursor(app, tx, client, 1, handle);
-                        *render_wanted = true;
-                    }
-                },
+                }
                 _ => {}
             }
         }
