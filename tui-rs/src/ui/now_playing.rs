@@ -192,7 +192,13 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) -> Option<Rect> {
         theme::CYAN,
     );
 
-    let help = "space play/pause   </> prev/next   f/b seek   [/] volume   tab speaker   ? help";
+    let help = if area.width >= 72 {
+        "space play/pause   </> prev/next   f/b seek   [] vol   tab spk   ? help"
+    } else if area.width >= 48 {
+        "spc pause   </> skip   f/b seek   [] vol   ?"
+    } else {
+        "spc  <>  f/b  []  ?"
+    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(help, theme::help_text()))),
         chunks[8],
