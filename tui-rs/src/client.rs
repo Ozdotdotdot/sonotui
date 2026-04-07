@@ -145,6 +145,11 @@ struct SpeakerBody {
 }
 
 #[derive(Debug, Serialize)]
+struct SeekBody {
+    seconds: i32,
+}
+
+#[derive(Debug, Serialize)]
 struct ReorderBody {
     from: i32,
     to: i32,
@@ -290,6 +295,10 @@ impl DaemonClient {
 
     pub async fn reconnect(&self) -> Result<()> {
         self.post_empty("/reconnect").await
+    }
+
+    pub async fn seek(&self, seconds: i32) -> Result<()> {
+        self.post_json("/seek", &SeekBody { seconds }).await
     }
 
     pub async fn play(&self) -> Result<()> {

@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::client::{Album, DaemonClient, LibraryEntry, QueueItem, SpeakerInfo, TrackInfo};
+use ratatui::layout::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -78,6 +79,9 @@ pub struct App {
     // Art state
     pub art_url: String,
     pub art_image_data: Option<ArtImageData>,
+
+    // Mouse seek target
+    pub progress_bar_area: Option<Rect>,
 
     // Queue tab
     pub queue: QueueState,
@@ -159,6 +163,7 @@ impl App {
             cmd_input: String::new(),
             art_url: String::new(),
             art_image_data: None,
+            progress_bar_area: None,
             queue: QueueState {
                 items: Vec::new(),
                 cursor: 0,

@@ -17,7 +17,10 @@ use clap::{Parser, ValueEnum};
 use client::{DaemonClient, DaemonEvent};
 use crossterm::{
     cursor::MoveTo,
-    event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers, MouseEvent,
+    },
     execute,
     terminal::{
         self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -87,6 +90,7 @@ enum AppEvent {
         signature: String,
         data: kitty::KittyImageData,
     },
+    Mouse(MouseEvent),
     Sse(DaemonEvent),
     Status(String),
     Error(String),
@@ -100,7 +104,8 @@ impl TerminalGuard {
     fn new() -> Result<Self> {
         enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .context("enter alternate screen")?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context("create terminal")?;
         Ok(Self { terminal })
@@ -110,7 +115,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -247,6 +256,7 @@ fn run_loop(
             }
 
             let mut art_area = None;
+            let mut progress_bar_area: Option<Rect> = None;
             terminal.draw(|f| {
                 let layout = Layout::vertical([
                     Constraint::Length(3),
@@ -264,7 +274,7 @@ fn run_loop(
                 } else {
                     match app.active_tab {
                         Tab::NowPlaying => {
-                            ui::now_playing::render(f, layout[2], app, art_mode == ArtMode::None);
+                            progress_bar_area = ui::now_playing::render(f, layout[2], app, art_mode == ArtMode::None);
                             art_area = Some(ui::now_playing::art_area(layout[2], app));
                         }
                         Tab::Queue => ui::queue::render(f, layout[2], app),
@@ -276,6 +286,7 @@ fn run_loop(
                 ui::render_command_line(f, layout[3], app);
                 ui::render_help_overlay(f, f.area(), app);
             })?;
+            app.progress_bar_area = progress_bar_area;
 
             // Kick off background Kitty encode if the signature has changed.
             if art_mode == ArtMode::Kitty
@@ -528,6 +539,39 @@ fn process_event(
             art_state.cached_kitty = Some((signature, data));
             *render_wanted = true;
         }
+        AppEvent::Mouse(mouse) => {
+            use crossterm::event::{MouseButton, MouseEventKind};
+            if app.input_mode != InputMode::Normal {
+                return;
+            }
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(area) = app.progress_bar_area {
+                        if mouse.row == area.y
+                            && mouse.column >= area.x
+                            && mouse.column < area.x + area.width
+                        {
+                            let duration = app.effective_duration();
+                            if duration > 0 {
+                                let ratio =
+                                    (mouse.column - area.x) as f64 / area.width as f64;
+                                let seconds = (ratio * duration as f64).round() as i32;
+                                app.elapsed = seconds;
+                                spawn_seek(handle, client.clone(), tx.clone(), seconds);
+                                *render_wanted = true;
+                            }
+                        }
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    spawn_volume(handle, client.clone(), tx.clone(), 2);
+                }
+                MouseEventKind::ScrollDown => {
+                    spawn_volume(handle, client.clone(), tx.clone(), -2);
+                }
+                _ => {}
+            }
+        }
         AppEvent::Sse(evt) => {
             handle_sse(app, evt, tx, client, handle);
             *render_wanted = true;
@@ -619,12 +663,32 @@ fn handle_sse(app: &mut App, evt: DaemonEvent, tx: &Sender<AppEvent>, client: &D
             if let Some(status) = evt.payload.get("status").and_then(|v| v.as_str()) {
                 app.albums.scan_status = status.to_string();
                 app.library_ready = status == "done";
+                if status == "scanning" {
+                    app.set_status("Rescanning library…");
+                } else if status == "done" {
+                    let count = evt
+                        .payload
+                        .get("track_count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    app.set_status(format!("Library ready — {count} tracks"));
+                }
             }
             if let Some(progress) = evt.payload.get("progress").and_then(|v| v.as_f64()) {
                 app.albums.scan_progress = progress;
             }
-            if app.library_ready && app.albums.albums.is_empty() {
-                spawn_albums_load(handle, client.clone(), tx.clone());
+            if app.library_ready {
+                if app.albums.albums.is_empty() {
+                    spawn_albums_load(handle, client.clone(), tx.clone());
+                }
+                spawn_library_column_load(
+                    handle,
+                    client.clone(),
+                    tx.clone(),
+                    0,
+                    "/".to_string(),
+                    "Library".to_string(),
+                );
             }
         }
         "error" => {
@@ -773,7 +837,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             }
         }
         _ => match app.active_tab {
-            Tab::NowPlaying => handle_now_playing_key(key, tx, client, handle),
+            Tab::NowPlaying => handle_now_playing_key(app, key, tx, client, handle),
             Tab::Queue => handle_queue_key(app, key, tx, client, handle),
             Tab::Library => handle_library_key(app, key, tx, client, handle),
             Tab::Albums => handle_album_key(app, key, tx, client, handle),
@@ -781,7 +845,21 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
     }
 }
 
-fn handle_now_playing_key(_key: KeyEvent, _tx: &Sender<AppEvent>, _client: &DaemonClient, _handle: &Handle) {
+fn handle_now_playing_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
+    match key.code {
+        KeyCode::Char('f') => {
+            let duration = app.effective_duration();
+            let seconds = (app.elapsed + 10).min(duration);
+            app.elapsed = seconds;
+            spawn_seek(handle, client.clone(), tx.clone(), seconds);
+        }
+        KeyCode::Char('b') => {
+            let seconds = (app.elapsed - 10).max(0);
+            app.elapsed = seconds;
+            spawn_seek(handle, client.clone(), tx.clone(), seconds);
+        }
+        _ => {}
+    }
 }
 
 fn handle_queue_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &DaemonClient, handle: &Handle) {
@@ -1398,6 +1476,13 @@ fn spawn_simple(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, act
     });
 }
 
+fn spawn_seek(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, seconds: i32) {
+    spawn_task(handle, tx, async move {
+        client.seek(seconds).await?;
+        Ok(AppEvent::Status(String::new()))
+    });
+}
+
 fn spawn_volume(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, delta: i32) {
     spawn_task(handle, tx, async move {
         client.volume_relative(delta).await?;
@@ -1638,6 +1723,11 @@ fn spawn_input_thread(tx: Sender<AppEvent>) {
                 }
                 Ok(CEvent::Resize(w, h)) => {
                     if tx.send(AppEvent::Resize(w, h)).is_err() {
+                        break;
+                    }
+                }
+                Ok(CEvent::Mouse(mouse)) => {
+                    if tx.send(AppEvent::Mouse(mouse)).is_err() {
                         break;
                     }
                 }

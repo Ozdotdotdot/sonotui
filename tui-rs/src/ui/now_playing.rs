@@ -24,7 +24,7 @@ struct NowPlayingLayout {
     info_panel: Rect,
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App, placeholder_only: bool) {
+pub fn render(f: &mut Frame, area: Rect, app: &App, placeholder_only: bool) -> Option<Rect> {
     let layout = compute_layout(area);
 
     let art_block = Block::default()
@@ -45,7 +45,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, placeholder_only: bool) {
         render_placeholder(f, art_inner, app.art_image_data.is_some());
     }
 
-    render_info(f, info_inner, app);
+    render_info(f, info_inner, app)
 }
 
 fn compute_layout(area: Rect) -> NowPlayingLayout {
@@ -103,9 +103,9 @@ fn render_placeholder(f: &mut Frame, area: Rect, has_direct_art: bool) {
     );
 }
 
-fn render_info(f: &mut Frame, area: Rect, app: &App) {
+fn render_info(f: &mut Frame, area: Rect, app: &App) -> Option<Rect> {
     if area.width < 12 || area.height < 10 {
-        return;
+        return None;
     }
 
     let chunks = Layout::vertical([
@@ -197,4 +197,6 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(Span::styled(help, theme::help_text()))),
         chunks[8],
     );
+
+    Some(chunks[5])
 }
