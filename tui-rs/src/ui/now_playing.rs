@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, placeholder_only: bool) -> O
     f.render_widget(art_block, layout.art_panel);
     f.render_widget(info_block, layout.info_panel);
 
-    if placeholder_only || app.art_image_data.is_none() {
+    if placeholder_only || (app.art_image_data.is_none() && app.connected && app.art_url.is_empty()) {
         render_placeholder(f, art_inner, app.art_image_data.is_some());
     }
 
