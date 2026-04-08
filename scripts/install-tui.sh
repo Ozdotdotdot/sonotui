@@ -46,7 +46,6 @@ URL="https://github.com/$REPO/releases/download/$VERSION/$FILENAME"
 echo "Installing sonotui $VERSION for $TARGET..."
 mkdir -p "$INSTALL_DIR"
 curl -fsSL "$URL" | tar -xz -C "$INSTALL_DIR"
-mv "$INSTALL_DIR/sonotui-${TARGET}" "$INSTALL_DIR/sonotui"
 chmod +x "$INSTALL_DIR/sonotui"
 
 echo ""
