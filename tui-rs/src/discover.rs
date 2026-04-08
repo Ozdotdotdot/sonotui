@@ -16,7 +16,7 @@ pub struct DaemonInfo {
 /// (100.64.0.0/10) used by mesh VPNs: Tailscale, Netbird, Headscale, etc.
 /// These addresses are stable and routable from anywhere the VPN is running,
 /// making them preferable to LAN IPs which are only reachable locally.
-fn is_mesh_vpn(ip: &str) -> bool {
+pub fn is_mesh_vpn(ip: &str) -> bool {
     let mut parts = ip.split('.');
     let a: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let b: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);

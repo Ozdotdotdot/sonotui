@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod client;
 mod config;
 mod discover;
@@ -98,6 +99,9 @@ enum AppEvent {
         signature: String,
         data: kitty::KittyImageData,
     },
+    /// Background mDNS discovery resolved to this address. Replaces the
+    /// placeholder client and triggers the normal connect sequence.
+    DaemonDiscovered(String, u16),
     Mouse(MouseEvent),
     Sse(DaemonEvent),
     Status(String),
@@ -148,47 +152,9 @@ const STATUS_POLL_INTERVAL: u32 = 150; // ~30s at 200ms tick
 fn main() -> Result<()> {
     let args = Args::parse();
     let art_mode = detect_art_mode(args.art);
-
-    // ── Resolve daemon address ────────────────────────────────────────────────
-    //
-    // Priority: explicit CLI flag > saved config > mDNS discovery > built-in default
-    //
     let cfg = config::load();
 
-    let (host, port) = if let (Some(h), p) = (args.host.as_deref(), args.port) {
-        // User passed --host explicitly: use it directly, skip everything else.
-        (h.to_string(), p.unwrap_or(8989))
-    } else if args.no_discover {
-        // --no-discover: honour config or fall back to localhost.
-        cfg.saved_server().unwrap_or_else(|| ("127.0.0.1".into(), 8989))
-    } else if let Some((h, p)) = cfg.saved_server() {
-        // Config has a previously saved address (written after a picker selection).
-        (h, p)
-    } else {
-        // No saved preference — run a short mDNS scan and pick automatically.
-        let daemons = discover::discover(Duration::from_millis(300));
-        match daemons.len() {
-            0 => ("127.0.0.1".into(), 8989),
-            1 => (daemons[0].host.clone(), daemons[0].port),
-            _ => {
-                // Multiple daemons: show the picker (it needs a live terminal).
-                let mut term = TerminalGuard::new()?;
-                let result = picker::run(&mut term.terminal, &daemons);
-                drop(term); // leave alternate screen before re-entering below
-                match result {
-                    picker::PickerResult::Selected(h, p) => {
-                        config::save_server(&h, p);
-                        (h, p)
-                    }
-                    picker::PickerResult::Quit => return Ok(()),
-                }
-            }
-        }
-    };
-
-    // ── Normal startup ────────────────────────────────────────────────────────
-    let client = DaemonClient::new(&host, port);
-    let mut app = App::new(client.clone());
+    // Channels must exist before spawning the discovery thread.
     let (tx, rx) = mpsc::channel();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -198,9 +164,69 @@ fn main() -> Result<()> {
         .context("create tokio runtime")?;
     let handle = runtime.handle().clone();
 
+    // ── Resolve daemon address ────────────────────────────────────────────────
+    //
+    // Priority: explicit CLI flag > saved config > background mDNS > built-in default
+    //
+    // When neither --host nor a saved config address is available, mDNS discovery
+    // runs in a background thread so the TUI opens immediately rather than
+    // blocking for 300 ms before showing anything.
+    let (client, immediate_connect) =
+        if let (Some(h), p) = (args.host.as_deref(), args.port) {
+            // --host provided: connect immediately, skip discovery.
+            (DaemonClient::new(h, p.unwrap_or(8989)), true)
+        } else if args.no_discover {
+            // --no-discover: honour config or fall back to localhost.
+            let (h, p) = cfg.saved_server().unwrap_or_else(|| ("127.0.0.1".into(), 8989));
+            (DaemonClient::new(&h, p), true)
+        } else if let Some((h, p)) = cfg.saved_server() {
+            // Config has a previously saved address.
+            (DaemonClient::new(&h, p), true)
+        } else {
+            // No saved preference — discover in background; open TUI immediately.
+            // A DaemonDiscovered event will arrive once mDNS resolves and replace
+            // the placeholder client.
+            let tx2 = tx.clone();
+            std::thread::spawn(move || {
+                let daemons = discover::discover(Duration::from_secs(3));
+                let (host, port) = match daemons.len() {
+                    0 => ("127.0.0.1".to_string(), 8989),
+                    1 => (daemons[0].host.clone(), daemons[0].port),
+                    _ => {
+                        // Multiple daemons: prefer mesh VPN (CGNAT 100.64/10), else first.
+                        daemons
+                            .iter()
+                            .find(|d| discover::is_mesh_vpn(&d.host))
+                            .or_else(|| daemons.first())
+                            .map(|d| (d.host.clone(), d.port))
+                            .unwrap_or_else(|| ("127.0.0.1".to_string(), 8989))
+                    }
+                };
+                let _ = tx2.send(AppEvent::DaemonDiscovered(host, port));
+            });
+            // Placeholder client — replaced when DaemonDiscovered fires.
+            (DaemonClient::new("127.0.0.1", 8989), false)
+        };
+
+    let mut app = App::new(client.clone());
+
+    // Load cached playback state so the first frame shows real content instead
+    // of empty panels. Elapsed is zeroed because it is stale.
+    if let Some(cached) = cache::load() {
+        app.transport = cached.transport;
+        app.art_url = cached.track.art_url.clone();
+        app.track = cached.track;
+        app.volume = cached.volume;
+        app.elapsed = 0;
+        app.cache_loaded = true;
+    }
+
     spawn_tick_thread(tx.clone(), Duration::from_millis(200));
     spawn_input_thread(tx.clone());
-    spawn_status_load(&handle, client.clone(), tx.clone());
+
+    if immediate_connect {
+        spawn_status_load(&handle, client.clone(), tx.clone());
+    }
 
     let mut term = TerminalGuard::new()?;
     let mut art_state = DirectArtState::default();
@@ -221,7 +247,7 @@ fn run_loop(
     app: &mut App,
     rx: Receiver<AppEvent>,
     tx: Sender<AppEvent>,
-    client: DaemonClient,
+    mut client: DaemonClient,
     art_mode: ArtMode,
     art_state: &mut DirectArtState,
     handle: &Handle,
@@ -263,14 +289,14 @@ fn run_loop(
         // so the Kitty write is skipped when the user has already left the tab.
         if let Some(event) = event {
             process_event(
-                app, event, &tx, &client, handle, art_mode,
+                app, event, &tx, &mut client, handle, art_mode,
                 &mut render_wanted, &mut resize_pending, &mut tick_count,
                 art_state,
             );
         }
         while let Ok(event) = rx.try_recv() {
             process_event(
-                app, event, &tx, &client, handle, art_mode,
+                app, event, &tx, &mut client, handle, art_mode,
                 &mut render_wanted, &mut resize_pending, &mut tick_count,
                 art_state,
             );
@@ -280,6 +306,7 @@ fn run_loop(
             clear_direct_art(terminal.backend_mut(), art_state)?;
             break;
         }
+
 
         // ── 3. Handle debounced resize ────────────────────────────────────────
         if let Some(when) = resize_pending {
@@ -317,7 +344,7 @@ fn run_loop(
                 status_area = Some(ui::common::render_header(f, layout[0], app));
                 ui::render_tab_bar(f, layout[1], app);
 
-                if !app.connected {
+                if !app.connected && !app.cache_loaded {
                     ui::common::render_connecting(f, layout[2], app);
                 } else {
                     match app.active_tab {
@@ -392,6 +419,16 @@ fn run_loop(
         }
     }
 
+    // Persist playback state so the next launch can show it instantly.
+    if app.connected || app.cache_loaded {
+        cache::save(&cache::CachedState {
+            transport: app.transport.clone(),
+            track: app.track.clone(),
+            volume: app.volume,
+            elapsed: app.elapsed,
+        });
+    }
+
     Ok(())
 }
 
@@ -400,7 +437,7 @@ fn process_event(
     app: &mut App,
     event: AppEvent,
     tx: &Sender<AppEvent>,
-    client: &DaemonClient,
+    client: &mut DaemonClient,
     handle: &Handle,
     _art_mode: ArtMode,
     render_wanted: &mut bool,
@@ -660,6 +697,14 @@ fn process_event(
         }
         AppEvent::Error(err) => {
             app.set_status(err);
+            *render_wanted = true;
+        }
+        AppEvent::DaemonDiscovered(host, port) => {
+            // Replace placeholder client with the discovered address, persist
+            // it to config, then kick off the normal connect sequence.
+            *client = DaemonClient::new(&host, port);
+            config::save_server(&host, port);
+            spawn_status_load(handle, client.clone(), tx.clone());
             *render_wanted = true;
         }
     }

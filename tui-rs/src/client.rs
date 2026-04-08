@@ -33,7 +33,7 @@ pub struct StatusResponse {
     pub library_ready: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrackInfo {
     #[serde(default)]
     pub title: String,

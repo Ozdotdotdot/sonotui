@@ -51,6 +51,9 @@ pub enum InputMode {
 
 pub struct App {
     pub connected: bool,
+    /// True when state was pre-populated from the on-disk cache but no live
+    /// connection has been established yet. Cleared by apply_status().
+    pub cache_loaded: bool,
 
     // Playback state
     pub transport: String,
@@ -144,6 +147,7 @@ impl App {
         let _ = client;
         Self {
             connected: false,
+            cache_loaded: false,
             transport: "STOPPED".to_string(),
             track: TrackInfo::default(),
             volume: 0,
