@@ -41,6 +41,7 @@ URL="https://github.com/$REPO/releases/download/$VERSION/$FILENAME"
 echo "Installing sonotuid $VERSION for $OS/$ARCH..."
 mkdir -p "$INSTALL_DIR"
 curl -fsSL "$URL" | tar -xz -C "$INSTALL_DIR"
+mv "$INSTALL_DIR/sonotuid-${OS}-${ARCH}" "$INSTALL_DIR/sonotuid"
 chmod +x "$INSTALL_DIR/sonotuid"
 
 echo ""
