@@ -2,8 +2,7 @@
 
 Self-hosted Sonos control. Go daemon + Rust terminal UI with native album art.
 
-<!-- Add a screenshot here once you have one -->
-<!-- ![sonotui](docs/screenshot.png) -->
+![sonotui](docs/NowPlaying.png)
 
 ## Why
 
@@ -76,3 +75,9 @@ cd tui-rs && cargo build --release
 ```
 
 Requires Go 1.22+ and Rust stable.
+
+## Screenshots
+
+| Albums | Library | Vertical layout |
+|---|---|---|
+| ![Albums](docs/Albums.png) | ![Library](docs/Library.png) | ![Vertical](docs/NowPlayingVertical.png) |
