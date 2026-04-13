@@ -23,7 +23,7 @@ const (
 	spectrumSampleRate = 44100
 	spectrumFFTSize    = 2048
 	spectrumChunkSec   = 30
-	spectrumTickRate   = 20 // Hz
+	spectrumTickRate   = 60 // Hz
 	spectrumMinFreq    = 60.0
 	spectrumMaxFreq    = 16000.0
 	spectrumDefBands   = 16
