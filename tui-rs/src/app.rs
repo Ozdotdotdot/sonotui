@@ -54,6 +54,9 @@ pub struct App {
     /// True when state was pre-populated from the on-disk cache but no live
     /// connection has been established yet. Cleared by apply_status().
     pub cache_loaded: bool,
+    /// Set when a connection attempt fails; cleared on successful connect.
+    /// Used by the UI to distinguish "cannot reach daemon" from "scanning".
+    pub connect_error: Option<String>,
 
     // Playback state
     pub transport: String,
@@ -149,6 +152,7 @@ impl App {
         Self {
             connected: false,
             cache_loaded: false,
+            connect_error: None,
             transport: "STOPPED".to_string(),
             track: TrackInfo::default(),
             volume: 0,
@@ -270,6 +274,7 @@ impl App {
 
     pub fn apply_status(&mut self, status: crate::client::StatusResponse) {
         self.connected = true;
+        self.connect_error = None;
         self.transport = status.transport;
         self.track = status.track;
         self.art_url = self.track.art_url.clone();

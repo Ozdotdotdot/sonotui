@@ -174,6 +174,12 @@ impl DaemonClient {
         }
     }
 
+    pub fn base_url(&self) -> &str {
+        self.base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+    }
+
     pub async fn status(&self) -> Result<StatusResponse> {
         self.http
             .get(format!("{}/status", self.base))

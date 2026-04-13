@@ -9,6 +9,30 @@ use ratatui::{
 use crate::{app::App, client::Album, theme};
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    if !app.connected {
+        let (title, subtitle) = if let Some(ref err) = app.connect_error {
+            (err.clone(), "Will retry automatically.")
+        } else {
+            ("Connecting to daemon…".to_string(), "")
+        };
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(subtitle, theme::secondary_text())),
+        ];
+        f.render_widget(
+            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
+        return;
+    }
+
     if !app.library_ready {
         let percent = if app.albums.scan_progress > 0.0 {
             format!(" {:.0}%", app.albums.scan_progress * 100.0)

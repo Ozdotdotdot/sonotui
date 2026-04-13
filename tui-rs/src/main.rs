@@ -102,6 +102,9 @@ enum AppEvent {
     /// Background mDNS discovery resolved to this address. Replaces the
     /// placeholder client and triggers the normal connect sequence.
     DaemonDiscovered(String, u16),
+    /// Connection attempt failed; UI should show the error instead of
+    /// "Scanning library...".
+    ConnectFailed(String),
     Mouse(MouseEvent),
     Sse(DaemonEvent),
     Status(String),
@@ -171,17 +174,18 @@ fn main() -> Result<()> {
     // When neither --host nor a saved config address is available, mDNS discovery
     // runs in a background thread so the TUI opens immediately rather than
     // blocking for 300 ms before showing anything.
-    let (client, immediate_connect) =
+    let (client, daemon_host, daemon_port, immediate_connect) =
         if let (Some(h), p) = (args.host.as_deref(), args.port) {
             // --host provided: connect immediately, skip discovery.
-            (DaemonClient::new(h, p.unwrap_or(8989)), true)
+            let port = p.unwrap_or(8989);
+            (DaemonClient::new(h, port), h.to_string(), port, true)
         } else if args.no_discover {
             // --no-discover: honour config or fall back to localhost.
             let (h, p) = cfg.saved_server().unwrap_or_else(|| ("127.0.0.1".into(), 8989));
-            (DaemonClient::new(&h, p), true)
+            (DaemonClient::new(&h, p), h, p, true)
         } else if let Some((h, p)) = cfg.saved_server() {
             // Config has a previously saved address.
-            (DaemonClient::new(&h, p), true)
+            (DaemonClient::new(&h, p), h, p, true)
         } else {
             // No saved preference — discover in background; open TUI immediately.
             // A DaemonDiscovered event will arrive once mDNS resolves and replace
@@ -205,7 +209,7 @@ fn main() -> Result<()> {
                 let _ = tx2.send(AppEvent::DaemonDiscovered(host, port));
             });
             // Placeholder client — replaced when DaemonDiscovered fires.
-            (DaemonClient::new("127.0.0.1", 8989), false)
+            (DaemonClient::new("127.0.0.1", 8989), "127.0.0.1".to_string(), 8989, false)
         };
 
     let mut app = App::new(client.clone());
@@ -225,7 +229,7 @@ fn main() -> Result<()> {
     spawn_input_thread(tx.clone());
 
     if immediate_connect {
-        spawn_status_load(&handle, client.clone(), tx.clone());
+        spawn_connect(daemon_host, daemon_port, handle.clone(), tx.clone());
     }
 
     let mut term = TerminalGuard::new()?;
@@ -480,7 +484,14 @@ fn process_event(
             *resize_pending = Some(Instant::now());
         }
         AppEvent::Connected(status) => {
+            // If we had a connect error, this is a reconnection — show which
+            // daemon we connected to so the user knows the retry succeeded.
+            let was_retrying = app.connect_error.is_some();
             app.apply_status(status);
+            if was_retrying {
+                let addr = client.base_url();
+                app.set_status(format!("Connected to {addr}"));
+            }
             app.albums.scan_status = if app.library_ready {
                 "done".to_string()
             } else {
@@ -724,6 +735,11 @@ fn process_event(
             *render_wanted = true;
         }
         AppEvent::Error(err) => {
+            app.set_status(err);
+            *render_wanted = true;
+        }
+        AppEvent::ConnectFailed(err) => {
+            app.connect_error = Some(err.clone());
             app.set_status(err);
             *render_wanted = true;
         }
@@ -1696,6 +1712,64 @@ fn spawn_album_add(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, 
 fn spawn_status_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
     spawn_task(handle, tx, async move {
         Ok(AppEvent::Connected(client.status().await?))
+    });
+}
+
+/// Connects to the daemon with retry and fallback mDNS discovery.
+///
+/// Tries the saved address first. On failure, retries with exponential backoff
+/// and periodically attempts mDNS discovery to find a daemon at a different
+/// address. Stops once connected (sends `AppEvent::Connected`).
+fn spawn_connect(host: String, port: u16, handle: Handle, tx: Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let mut backoff = Duration::from_secs(2);
+        let mut attempts = 0u32;
+
+        loop {
+            // Try the current address.
+            let client = DaemonClient::new(&host, port);
+            match handle.block_on(client.status()) {
+                Ok(status) => {
+                    let _ = tx.send(AppEvent::Connected(status));
+                    return;
+                }
+                Err(_) => {
+                    let msg = format!("Cannot reach {host}:{port} — retrying…");
+                    let _ = tx.send(AppEvent::ConnectFailed(msg));
+                }
+            }
+
+            attempts += 1;
+
+            // After first failure, try mDNS discovery every other attempt.
+            if attempts >= 2 && attempts % 2 == 0 {
+                let daemons = discover::discover(Duration::from_secs(3));
+                let found = match daemons.len() {
+                    0 => None,
+                    1 => Some((daemons[0].host.clone(), daemons[0].port)),
+                    _ => daemons
+                        .iter()
+                        .find(|d| discover::is_mesh_vpn(&d.host))
+                        .or(daemons.first())
+                        .map(|d| (d.host.clone(), d.port)),
+                };
+
+                if let Some((disc_host, disc_port)) = found {
+                    let disc_client = DaemonClient::new(&disc_host, disc_port);
+                    if let Ok(status) = handle.block_on(disc_client.status()) {
+                        let _ = tx.send(AppEvent::DaemonDiscovered(
+                            disc_host.clone(),
+                            disc_port,
+                        ));
+                        let _ = tx.send(AppEvent::Connected(status));
+                        return;
+                    }
+                }
+            }
+
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_secs(15));
+        }
     });
 }
 

@@ -24,6 +24,38 @@ fn render_columns(f: &mut Frame, area: Rect, app: &App) {
     ])
     .split(area);
 
+    // Show a message in the first column when not connected and no data loaded.
+    if !app.connected && app.library.columns.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::pane_border_focus())
+            .title(" Artist ");
+        let inner = block.inner(chunks[0]);
+        f.render_widget(block, chunks[0]);
+
+        let msg = if let Some(ref err) = app.connect_error {
+            err.clone()
+        } else {
+            "Connecting to daemon…".to_string()
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                msg,
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(ratatui::layout::Alignment::Center),
+            inner,
+        );
+
+        // Render empty remaining columns.
+        for (idx, chunk) in chunks.iter().enumerate().skip(1) {
+            render_column(f, *chunk, app, idx);
+        }
+        return;
+    }
+
     for (idx, chunk) in chunks.iter().enumerate() {
         render_column(f, *chunk, app, idx);
     }

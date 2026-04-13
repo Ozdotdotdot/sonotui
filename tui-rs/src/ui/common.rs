@@ -110,7 +110,9 @@ pub fn render_connecting(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let msg = if app.status_msg.is_empty() {
+    let msg = if let Some(ref err) = app.connect_error {
+        err.as_str()
+    } else if app.status_msg.is_empty() {
         "Connecting to sonotuid..."
     } else {
         &app.status_msg
