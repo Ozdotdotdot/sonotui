@@ -44,12 +44,14 @@ type Spectrum struct {
 	musicRoot string
 
 	// Decoder state (protected by mu).
-	trackGen   uint64
-	trackPath  string // absolute path to current audio file
-	cancel     context.CancelFunc
-	pcmBuf     []int16
-	chunkStart int // start offset in seconds
-	chunkEnd   int // end offset in seconds
+	trackGen     uint64
+	trackPath    string // absolute path to current audio file
+	cancel       context.CancelFunc
+	pcmBuf       []int16
+	chunkStart   int // start offset in seconds
+	chunkEnd     int // end offset in seconds
+	sampleCursor int // sub-second sample position within chunk, advances each tick
+	lastElapsed  int // last seen elapsed value (for detecting seeks)
 
 	// Precomputed (immutable after init).
 	ffmpegPath string
@@ -177,12 +179,21 @@ func (s *Spectrum) tick(ctx context.Context) {
 		s.pcmBuf = nil
 		s.chunkStart = 0
 		s.chunkEnd = 0
+		s.sampleCursor = 0
+		s.lastElapsed = elapsed
 		s.loadChunk(ctx, elapsed)
+	}
+
+	// Elapsed jumped (seek or second boundary) — resync cursor.
+	if elapsed != s.lastElapsed {
+		s.sampleCursor = (elapsed - s.chunkStart) * spectrumSampleRate
+		s.lastElapsed = elapsed
 	}
 
 	// Elapsed moved outside buffered range (seek or natural progression).
 	if s.pcmBuf != nil && (elapsed < s.chunkStart || elapsed >= s.chunkEnd) {
 		s.loadChunk(ctx, elapsed)
+		s.sampleCursor = (elapsed - s.chunkStart) * spectrumSampleRate
 	}
 
 	// No buffer available yet — emit zero bands.
@@ -196,8 +207,12 @@ func (s *Spectrum) tick(ctx context.Context) {
 		return
 	}
 
-	// Compute sample offset within the chunk.
-	sampleOffset := (elapsed - s.chunkStart) * spectrumSampleRate
+	// Advance cursor by samples-per-tick for sub-second resolution.
+	// At 170Hz, 44100/170 ≈ 259 samples per tick.
+	samplesPerTick := spectrumSampleRate / spectrumTickRate
+	sampleOffset := s.sampleCursor
+	s.sampleCursor += samplesPerTick
+
 	if sampleOffset+spectrumFFTSize > len(s.pcmBuf) {
 		sampleOffset = len(s.pcmBuf) - spectrumFFTSize
 	}
