@@ -24,6 +24,8 @@ directly to your Sonos speakers. A terminal client — inspired by
 - **Zero-config discovery:** daemon advertises over mDNS; the TUI finds it automatically on first launch
 - **Album and library browser:** browse by folder or by album metadata, with fuzzy search
 - **Queue management:** reorder, remove, jump to track, batch-add directories
+- **Real-time spectrum endpoint:** FFT-derived frequency band data for the currently playing track, consumable by external visualizers over the LAN
+- **Connection resilience:** the TUI retries unreachable daemons with exponential backoff and falls back to mDNS discovery automatically
 - **Fast!** The client is written in Rust, and the daemon in Go!
 
 ## Install
@@ -58,6 +60,33 @@ auto-connects — or shows a picker if it finds more than one.
 
 Both binaries are statically compiled with no runtime dependencies.
 
+## Spectrum endpoint
+
+The daemon exposes a `GET /spectrum` endpoint that returns real-time FFT frequency
+band data for the currently playing local track. This is designed for external
+visualizers — for example, a Raspberry Pi driving RGB on a keyboard over the LAN.
+
+```sh
+curl -s http://your-server:8989/spectrum
+```
+
+```json
+{
+  "bands": [0.04, 0.49, 0.64, 0.79, 1.0, 0.17, 0.14, 0.16, 0.26, 0.08, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0],
+  "elapsed": 12,
+  "track_gen": 0,
+  "playing": true
+}
+```
+
+- **`bands`**: 16 logarithmic frequency bands (~60 Hz to ~16 kHz), normalized 0.0–1.0
+- **`?bands=N`**: request 8–32 bands instead of the default 16
+- Returns `null` bands when nothing is playing, during line-in, or for non-local tracks
+- Designed for polling at 10–30 Hz; each response is ~200 bytes
+
+Requires `ffmpeg` on the server (installed alongside `ffprobe`, which the daemon
+already uses for library scanning).
+
 ## Documentation
 
 - [API Reference](docs/api.md) — all REST endpoints and SSE event types
@@ -74,7 +103,7 @@ go build ./cmd/sonotuid/
 cd tui-rs && cargo build --release
 ```
 
-Requires Go 1.22+ and Rust stable.
+Requires Go 1.22+, Rust stable, and `ffmpeg`/`ffprobe` on the daemon host.
 
 ## Screenshots
 
