@@ -245,11 +245,17 @@ func main() {
 
 	// ── Initialise subsystems ────────────────────────────────────────────────
 
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
 	state := daemon.NewState()
 	events := daemon.NewBroadcaster()
 
 	// Library.
 	lib := daemon.NewLibrary(cfg.LibraryPath, cfg.CachePath)
+
+	// Spectrum analyzer.
+	spectrum := daemon.NewSpectrum(state, cfg.LibraryPath)
 
 	// Sonos manager.
 	sonosMgr := daemon.NewSonosManager(state, events, lib, cfg.LanIP, cfg.FilePort, cfg.PreferredSpeaker)
@@ -262,7 +268,7 @@ func main() {
 	}
 
 	// REST API on :8989.
-	api := daemon.NewAPI(state, events, sonosMgr, lib, cfg.LanIP, cfg.FilePort)
+	api := daemon.NewAPI(state, events, sonosMgr, lib, spectrum, cfg.LanIP, cfg.FilePort)
 	if subFS, err := fs.Sub(webFS, "web"); err == nil {
 		api.SetWebFS(subFS)
 	} else {
@@ -304,6 +310,9 @@ func main() {
 		defer mdnsSrv.Shutdown()
 	}
 
+	// Start spectrum analyzer.
+	go spectrum.Run(ctx)
+
 	// Start Sonos manager (discovery + GENA).
 	if err := sonosMgr.Start(); err != nil {
 		log.Printf("sonos manager: %v", err)
@@ -319,6 +328,7 @@ func main() {
 	<-sigCh
 
 	log.Println("shutting down...")
+	ctxCancel()
 	sonosMgr.Shutdown()
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)

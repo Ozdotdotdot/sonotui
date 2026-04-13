@@ -17,6 +17,7 @@ type API struct {
 	events   *Broadcaster
 	sonos    *SonosManager
 	lib      *Library
+	spectrum *Spectrum
 	lanIP    string
 	filePort int
 	webFS    fs.FS
@@ -28,12 +29,13 @@ func (a *API) SetWebFS(fsys fs.FS) {
 }
 
 // NewAPI creates an API handler.
-func NewAPI(state *State, events *Broadcaster, sonos *SonosManager, lib *Library, lanIP string, filePort int) *API {
+func NewAPI(state *State, events *Broadcaster, sonos *SonosManager, lib *Library, spectrum *Spectrum, lanIP string, filePort int) *API {
 	return &API{
 		state:    state,
 		events:   events,
 		sonos:    sonos,
 		lib:      lib,
+		spectrum: spectrum,
 		lanIP:    lanIP,
 		filePort: filePort,
 	}
@@ -71,6 +73,9 @@ func (a *API) Handler() http.Handler {
 	// State + SSE.
 	mux.HandleFunc("GET /status", a.handleStatus)
 	mux.HandleFunc("GET /events", a.events.ServeHTTP)
+
+	// Spectrum.
+	mux.HandleFunc("GET /spectrum", a.handleSpectrum)
 
 	// Speakers.
 	mux.HandleFunc("GET /speakers", a.handleGetSpeakers)
@@ -543,4 +548,52 @@ func (a *API) handleArt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.Write(data) //nolint:errcheck
+}
+
+// ── Spectrum ─────────────────────────────────────────────────────────────────
+
+func (a *API) handleSpectrum(w http.ResponseWriter, r *http.Request) {
+	if a.spectrum == nil {
+		writeErr(w, http.StatusServiceUnavailable, "spectrum not available (ffmpeg not found)")
+		return
+	}
+
+	frame := a.spectrum.Frame()
+
+	// Allow caller to request a different band count via ?bands=N.
+	if bStr := r.URL.Query().Get("bands"); bStr != "" {
+		if n, err := strconv.Atoi(bStr); err == nil && n >= 8 && n <= 32 && n != len(frame.Bands) && frame.Bands != nil {
+			frame.Bands = rebinBands(frame.Bands, n)
+		}
+	}
+
+	writeJSON(w, frame)
+}
+
+// rebinBands linearly interpolates bands to a different count.
+func rebinBands(src []float64, n int) []float64 {
+	if len(src) == 0 || n <= 0 {
+		return make([]float64, n)
+	}
+	dst := make([]float64, n)
+	ratio := float64(len(src)) / float64(n)
+	for i := range dst {
+		lo := float64(i) * ratio
+		hi := float64(i+1) * ratio
+		loIdx := int(lo)
+		hiIdx := int(hi)
+		if hiIdx >= len(src) {
+			hiIdx = len(src) - 1
+		}
+		var sum float64
+		count := 0
+		for j := loIdx; j <= hiIdx; j++ {
+			sum += src[j]
+			count++
+		}
+		if count > 0 {
+			dst[i] = sum / float64(count)
+		}
+	}
+	return dst
 }

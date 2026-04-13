@@ -1,11 +1,12 @@
 module github.com/ozdotdotdot/sonotui
 
-go 1.22
+go 1.25.5
 
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/koron/go-ssdp v0.0.4
+	github.com/madelynnblue/go-dsp v1.0.0
 	github.com/sahilm/fuzzy v0.1.1
 )
 
