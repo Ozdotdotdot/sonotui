@@ -2,5 +2,7 @@ sonotui-spec.md
 sonotui-spec-v2.md
 /sonotui
 /sonotuid
-/tui-rs/target/
+bin/
+tui-rs/target/
 *.log
+.codex

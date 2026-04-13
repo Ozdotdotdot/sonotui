@@ -562,7 +562,7 @@ func (a *API) handleSpectrum(w http.ResponseWriter, r *http.Request) {
 
 	// Allow caller to request a different band count via ?bands=N.
 	if bStr := r.URL.Query().Get("bands"); bStr != "" {
-		if n, err := strconv.Atoi(bStr); err == nil && n >= 8 && n <= 32 && n != len(frame.Bands) && frame.Bands != nil {
+		if n, err := strconv.Atoi(bStr); err == nil && n >= 1 && n <= 32 && n != len(frame.Bands) && frame.Bands != nil {
 			frame.Bands = rebinBands(frame.Bands, n)
 		}
 	}

@@ -194,6 +194,7 @@ func (s *Spectrum) tick(ctx context.Context) {
 	if s.pcmBuf != nil && (elapsed < s.chunkStart || elapsed >= s.chunkEnd) {
 		s.loadChunk(ctx, elapsed)
 		s.sampleCursor = (elapsed - s.chunkStart) * spectrumSampleRate
+		s.lastElapsed = elapsed
 	}
 
 	// No buffer available yet — emit zero bands.
