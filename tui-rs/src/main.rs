@@ -544,21 +544,49 @@ fn process_event(
             if depth == 0 {
                 app.library.current_path = path.clone();
                 app.library.entries = entries.clone();
-                app.library.cursor = 0;
+
+                let mut cursor = 0;
+                let mut nav_target_column = 0;
+                if let Some(ref nav) = app.library.pending_nav {
+                    nav_target_column = nav.len().min(2);
+                    if let Some(segment) = nav.get(0) {
+                        if let Some(pos) = entries.iter().position(|e| e.name == *segment) {
+                            cursor = pos;
+                        }
+                    }
+                    if nav.len() <= 1 {
+                        app.library.pending_nav = None;
+                    }
+                }
+
+                app.library.cursor = cursor;
                 app.library.columns.clear();
                 app.library.columns.push(app::LibraryColumn {
                     title,
                     entries,
-                    cursor: 0,
+                    cursor,
                 });
-                app.library.active_column = 0;
+                app.library.active_column = nav_target_column;
                 queue_library_preview(tx, client, app, 0, handle);
             } else if depth <= 2 && library_preview_matches(app, depth, &path) {
                 app.library.columns.truncate(depth);
+
+                let mut cursor = 0;
+                if let Some(ref nav) = app.library.pending_nav {
+                    if let Some(segment) = nav.get(depth) {
+                        if let Some(pos) = entries.iter().position(|e| e.name == *segment) {
+                            cursor = pos;
+                        }
+                    }
+                    if nav.len() <= depth + 1 {
+                        app.library.pending_nav = None;
+                    }
+                }
+
                 app.library.columns.push(app::LibraryColumn {
                     title,
                     entries,
-                    cursor: 0,
+                    cursor,
                 });
                 if app.library.active_column > app.library.columns.len().saturating_sub(1) {
                     app.library.active_column = app.library.columns.len().saturating_sub(1);
@@ -1096,30 +1124,27 @@ fn handle_library_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, clien
                     app.library.search_query.clear();
                     app.library.search_results.clear();
                     app.input_mode = InputMode::Normal;
-                    if entry.entry_type == "dir" {
-                        spawn_library_column_load(
-                            handle,
-                            client.clone(),
-                            tx.clone(),
-                            0,
-                            entry.path.clone(),
-                            title_for_library_path(&entry.path, &entry.name),
-                        );
-                    } else {
-                        let dir = entry
-                            .path
-                            .rsplit_once('/')
-                            .map(|(parent, _)| format!("/{parent}"))
-                            .unwrap_or_else(|| "/".to_string());
-                        spawn_library_column_load(
-                            handle,
-                            client.clone(),
-                            tx.clone(),
-                            0,
-                            dir.clone(),
-                            title_for_library_path(&dir, ""),
-                        );
+
+                    let segments: Vec<String> = entry
+                        .path
+                        .trim_matches('/')
+                        .split('/')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    if !segments.is_empty() {
+                        app.library.pending_nav = Some(segments);
                     }
+
+                    spawn_library_column_load(
+                        handle,
+                        client.clone(),
+                        tx.clone(),
+                        0,
+                        "/".to_string(),
+                        "Library".to_string(),
+                    );
                 }
             }
             _ => {}

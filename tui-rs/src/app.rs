@@ -122,6 +122,7 @@ pub struct LibraryState {
     pub search_query: String,
     pub search_results: Vec<LibraryEntry>,
     pub search_cursor: usize,
+    pub pending_nav: Option<Vec<String>>,
 }
 
 pub struct LibraryColumn {
@@ -187,6 +188,7 @@ impl App {
                 search_query: String::new(),
                 search_results: Vec::new(),
                 search_cursor: 0,
+                pending_nav: None,
             },
             albums: AlbumState {
                 albums: Vec::new(),
