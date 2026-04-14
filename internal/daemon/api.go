@@ -18,6 +18,7 @@ type API struct {
 	sonos    *SonosManager
 	lib      *Library
 	spectrum *Spectrum
+	moods    *MoodManager
 	lanIP    string
 	filePort int
 	webFS    fs.FS
@@ -29,13 +30,14 @@ func (a *API) SetWebFS(fsys fs.FS) {
 }
 
 // NewAPI creates an API handler.
-func NewAPI(state *State, events *Broadcaster, sonos *SonosManager, lib *Library, spectrum *Spectrum, lanIP string, filePort int) *API {
+func NewAPI(state *State, events *Broadcaster, sonos *SonosManager, lib *Library, spectrum *Spectrum, moods *MoodManager, lanIP string, filePort int) *API {
 	return &API{
 		state:    state,
 		events:   events,
 		sonos:    sonos,
 		lib:      lib,
 		spectrum: spectrum,
+		moods:    moods,
 		lanIP:    lanIP,
 		filePort: filePort,
 	}
@@ -102,6 +104,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /albums", a.handleGetAlbums)
 	mux.HandleFunc("GET /albums/search", a.handleAlbumsSearch)
 	mux.HandleFunc("/albums/", a.handleAlbumByID)
+
+	// Moods.
+	mux.HandleFunc("GET /moods", a.handleListMoods)
+	mux.HandleFunc("POST /moods/reload", a.handleReloadMoods)
+	mux.HandleFunc("/moods/", a.handleMoodAction)
 
 	// Art (served by fileserver on :8990, but also proxied here for TUI convenience).
 	mux.HandleFunc("GET /art/", a.handleArt)
@@ -568,6 +575,75 @@ func (a *API) handleSpectrum(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, frame)
+}
+
+// ── Moods ────────────────────────────────────────────────────────────────────
+
+func (a *API) handleListMoods(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, a.moods.List())
+}
+
+func (a *API) handleReloadMoods(w http.ResponseWriter, r *http.Request) {
+	a.moods.Load()
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (a *API) handleMoodAction(w http.ResponseWriter, r *http.Request) {
+	// Expect /moods/{name}/play
+	rest := strings.TrimPrefix(r.URL.Path, "/moods/")
+	name, action, _ := strings.Cut(rest, "/")
+	if name == "" || action != "play" || r.Method != http.MethodPost {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	tracks, _, err := a.moods.Resolve(name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tracks == nil {
+		writeErr(w, http.StatusNotFound, "mood not found: "+name)
+		return
+	}
+	if len(tracks) == 0 {
+		writeErr(w, http.StatusNotFound, "mood has no tracks: "+name)
+		return
+	}
+
+	// Clear the queue.
+	if err := a.sonos.ClearQueue(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "clear queue: "+err.Error())
+		return
+	}
+
+	// Add all resolved tracks.
+	added := 0
+	for _, t := range tracks {
+		fileURI := a.lib.TrackFileURI(a.lanIP, a.filePort, t)
+		artURI := ""
+		if t.ArtHash != "" {
+			artURI = fmt.Sprintf("http://%s:%d/art/%s", a.lanIP, a.filePort, t.ArtHash)
+		}
+		metadata := BuildDIDLLite(t, fileURI, artURI)
+		if err := a.sonos.AddToQueue(fileURI, metadata); err != nil {
+			log.Printf("mood %s: add %s: %v", name, t.Path, err)
+			continue
+		}
+		added++
+	}
+
+	// Start playback from position 1.
+	if added > 0 {
+		if err := a.sonos.PlayFromQueue(1); err != nil {
+			log.Printf("mood %s: play from queue: %v", name, err)
+		}
+	}
+
+	writeJSON(w, map[string]any{
+		"mood":         name,
+		"tracks_added": added,
+	})
 }
 
 // rebinBands linearly interpolates bands to a different count.

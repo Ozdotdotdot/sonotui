@@ -32,6 +32,7 @@ type Config struct {
 	LanIP            string
 	LibraryPath      string
 	CachePath        string
+	MoodsDir         string
 	PreferredSpeaker string
 	DisplayName      string
 }
@@ -83,6 +84,8 @@ func loadConfig(path string) Config {
 			cfg.LibraryPath = expandHome(v)
 		case "library.cache":
 			cfg.CachePath = expandHome(v)
+		case "moods.dir":
+			cfg.MoodsDir = expandHome(v)
 		case "sonos.preferred_speaker":
 			cfg.PreferredSpeaker = v
 		case "server.display_name":
@@ -257,6 +260,16 @@ func main() {
 	// Spectrum analyzer.
 	spectrum := daemon.NewSpectrum(state, cfg.LibraryPath)
 
+	// Moods.
+	moodsDir := cfg.MoodsDir
+	if moodsDir == "" {
+		moodsDir = filepath.Join(os.Getenv("HOME"), ".config", "sonotuid", "moods")
+	}
+	os.MkdirAll(moodsDir, 0o755)
+	moods := daemon.NewMoodManager(moodsDir, lib)
+	moods.Load()
+	log.Printf("daemon: moods dir=%s", moodsDir)
+
 	// Sonos manager.
 	sonosMgr := daemon.NewSonosManager(state, events, lib, cfg.LanIP, cfg.FilePort, cfg.PreferredSpeaker)
 
@@ -268,7 +281,7 @@ func main() {
 	}
 
 	// REST API on :8989.
-	api := daemon.NewAPI(state, events, sonosMgr, lib, spectrum, cfg.LanIP, cfg.FilePort)
+	api := daemon.NewAPI(state, events, sonosMgr, lib, spectrum, moods, cfg.LanIP, cfg.FilePort)
 	if subFS, err := fs.Sub(webFS, "web"); err == nil {
 		api.SetWebFS(subFS)
 	} else {
