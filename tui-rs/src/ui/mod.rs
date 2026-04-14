@@ -1,6 +1,7 @@
 pub mod albums;
 pub mod common;
 pub mod library;
+pub mod moods;
 pub mod now_playing;
 pub mod queue;
 

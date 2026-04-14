@@ -151,7 +151,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
                 .fg(theme::TEXT)
                 .add_modifier(Modifier::BOLD),
         )),
-        line("1-4 switch tabs"),
+        line("1-5 switch tabs"),
         line("gt / gT cycle tabs"),
         line("space play/pause"),
         line("s stop"),
@@ -202,6 +202,13 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
             lines.push(line("enter / a add previewed album to queue"));
             lines.push(line("/ search"));
             lines.push(line(":rescan  rescan library"));
+        }
+        Tab::Moods => {
+            lines.push(Line::from(Span::styled("Moods", theme::title_style())));
+            lines.push(line("j/k or arrows navigate"));
+            lines.push(line("hovered mood previews tracks"));
+            lines.push(line("enter play mood (clears queue)"));
+            lines.push(line("r reload moods from disk"));
         }
     }
 

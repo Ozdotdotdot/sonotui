@@ -128,6 +128,20 @@ func (m *MoodManager) List() []MoodListItem {
 	return items
 }
 
+// Preview returns a mood's resolved tracks in stable order (no shuffle) for UI preview.
+func (m *MoodManager) Preview(name string) ([]Track, *Mood, error) {
+	m.mu.RLock()
+	mood, ok := m.moods[name]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, nil, nil
+	}
+
+	tracks := m.resolveTracks(mood)
+	return tracks, &mood, nil
+}
+
 // Resolve looks up a mood by name and returns its tracks and shuffle preference.
 func (m *MoodManager) Resolve(name string) ([]Track, bool, error) {
 	m.mu.RLock()

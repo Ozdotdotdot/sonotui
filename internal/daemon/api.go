@@ -589,10 +589,36 @@ func (a *API) handleReloadMoods(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleMoodAction(w http.ResponseWriter, r *http.Request) {
-	// Expect /moods/{name}/play
 	rest := strings.TrimPrefix(r.URL.Path, "/moods/")
-	name, action, _ := strings.Cut(rest, "/")
-	if name == "" || action != "play" || r.Method != http.MethodPost {
+	name, action, hasAction := strings.Cut(rest, "/")
+	if name == "" {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	// GET /moods/{name} — preview (returns resolved track list, no shuffle).
+	if r.Method == http.MethodGet && !hasAction {
+		tracks, mood, err := a.moods.Preview(name)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if mood == nil {
+			writeErr(w, http.StatusNotFound, "mood not found: "+name)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"name":        mood.Name,
+			"description": mood.Description,
+			"shuffle":     mood.Shuffle,
+			"track_count": len(tracks),
+			"tracks":      tracks,
+		})
+		return
+	}
+
+	// POST /moods/{name}/play — clear queue, load mood, start playback.
+	if r.Method != http.MethodPost || action != "play" {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}

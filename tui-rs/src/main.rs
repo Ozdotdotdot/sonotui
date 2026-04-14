@@ -91,6 +91,12 @@ enum AppEvent {
         id: String,
         detail: client::AlbumDetail,
     },
+    MoodsLoaded(Vec<client::MoodListItem>),
+    MoodDetailLoaded {
+        name: String,
+        detail: client::MoodDetail,
+    },
+    MoodPlayed(String),
     ArtLoaded {
         url: String,
         image: Option<ArtImageData>,
@@ -359,6 +365,7 @@ fn run_loop(
                         Tab::Queue => ui::queue::render(f, layout[2], app),
                         Tab::Library => ui::library::render(f, layout[2], app),
                         Tab::Albums => ui::albums::render(f, layout[2], app),
+                        Tab::Moods => ui::moods::render(f, layout[2], app),
                     }
                 }
 
@@ -647,6 +654,26 @@ fn process_event(
                 *render_wanted = true;
             }
         }
+        AppEvent::MoodsLoaded(moods) => {
+            app.moods.moods = moods;
+            if app.moods.cursor >= app.moods.moods.len() {
+                app.moods.cursor = app.moods.moods.len().saturating_sub(1);
+            }
+            queue_mood_preview(tx, client, app, handle);
+            *render_wanted = true;
+        }
+        AppEvent::MoodDetailLoaded { name, detail } => {
+            if app.moods.preview_name == name {
+                app.moods.preview_tracks = detail.tracks;
+                *render_wanted = true;
+            }
+        }
+        AppEvent::MoodPlayed(name) => {
+            app.set_status(format!("Playing mood: {name}"));
+            // Refresh queue since we just replaced it.
+            spawn_queue_load(handle, client.clone(), tx.clone());
+            *render_wanted = true;
+        }
         AppEvent::ArtLoaded { url, image } => {
             if url == app.art_url {
                 // Invalidate any cached Kitty encode — image bytes have changed.
@@ -718,6 +745,10 @@ fn process_event(
                             }
                             (Tab::Albums, d) => {
                                 move_album_cursor(app, tx, client, -d as isize, handle);
+                                *render_wanted = true;
+                            }
+                            (Tab::Moods, d) => {
+                                move_mood_cursor(app, tx, client, -d as isize, handle);
                                 *render_wanted = true;
                             }
                         }
@@ -934,6 +965,14 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             }
             return;
         }
+        KeyCode::Char('5') => {
+            app.active_tab = Tab::Moods;
+            app.clear_g_pending();
+            if app.moods.moods.is_empty() {
+                spawn_moods_load(handle, client.clone(), tx.clone());
+            }
+            return;
+        }
         KeyCode::Char('g') => {
             if app.g_pending {
                 match app.active_tab {
@@ -946,6 +985,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
                         }
                     }
                     Tab::Albums => app.albums.cursor = 0,
+                    Tab::Moods => app.moods.cursor = 0,
                     Tab::NowPlaying => {}
                 }
                 app.clear_g_pending();
@@ -1006,6 +1046,7 @@ fn handle_key(app: &mut App, key: KeyEvent, tx: &Sender<AppEvent>, client: &Daem
             Tab::Queue => handle_queue_key(app, key, tx, client, handle),
             Tab::Library => handle_library_key(app, key, tx, client, handle),
             Tab::Albums => handle_album_key(app, key, tx, client, handle),
+            Tab::Moods => handle_moods_key(app, key, tx, client, handle),
         },
     }
 }
@@ -1831,6 +1872,36 @@ fn spawn_album_detail_load(handle: &Handle, client: DaemonClient, tx: Sender<App
     });
 }
 
+fn spawn_moods_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>) {
+    spawn_task(handle, tx, async move {
+        Ok(AppEvent::MoodsLoaded(client.moods().await?))
+    });
+}
+
+fn spawn_mood_detail_load(
+    handle: &Handle,
+    client: DaemonClient,
+    tx: Sender<AppEvent>,
+    name: String,
+) {
+    spawn_task(handle, tx, async move {
+        let detail = client.mood_detail(&name).await?;
+        Ok(AppEvent::MoodDetailLoaded { name, detail })
+    });
+}
+
+fn spawn_mood_play(
+    handle: &Handle,
+    client: DaemonClient,
+    tx: Sender<AppEvent>,
+    name: String,
+) {
+    spawn_task(handle, tx, async move {
+        client.play_mood(&name).await?;
+        Ok(AppEvent::MoodPlayed(name))
+    });
+}
+
 fn spawn_art_load(handle: &Handle, client: DaemonClient, tx: Sender<AppEvent>, url: String) {
     spawn_task(handle, tx, async move {
         let bytes = client.fetch_art_bytes(&url).await?;
@@ -2182,4 +2253,68 @@ fn move_album_cursor(app: &mut App, tx: &Sender<AppEvent>, client: &DaemonClient
     };
     app.albums.cursor = next;
     queue_album_preview(tx, client, app, handle);
+}
+
+// ── Moods ────────────────────────────────────────────────────────────────────
+
+fn handle_moods_key(
+    app: &mut App,
+    key: KeyEvent,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+    handle: &Handle,
+) {
+    match key.code {
+        KeyCode::Char('k') | KeyCode::Up => move_mood_cursor(app, tx, client, -1, handle),
+        KeyCode::Char('j') | KeyCode::Down => move_mood_cursor(app, tx, client, 1, handle),
+        KeyCode::Char('G') => {
+            app.moods.cursor = app.moods.moods.len().saturating_sub(1);
+            queue_mood_preview(tx, client, app, handle);
+        }
+        KeyCode::Enter => {
+            if let Some(mood) = app.moods.moods.get(app.moods.cursor).cloned() {
+                spawn_mood_play(handle, client.clone(), tx.clone(), mood.name);
+            }
+        }
+        KeyCode::Char('r') => {
+            spawn_moods_load(handle, client.clone(), tx.clone());
+            app.set_status("Reloading moods…");
+        }
+        _ => {}
+    }
+}
+
+fn queue_mood_preview(
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+    app: &mut App,
+    handle: &Handle,
+) {
+    if let Some(mood) = app.moods.moods.get(app.moods.cursor).cloned() {
+        if app.moods.preview_name != mood.name {
+            app.moods.preview_name = mood.name.clone();
+            app.moods.preview_tracks.clear();
+            spawn_mood_detail_load(handle, client.clone(), tx.clone(), mood.name);
+        }
+    }
+}
+
+fn move_mood_cursor(
+    app: &mut App,
+    tx: &Sender<AppEvent>,
+    client: &DaemonClient,
+    delta: isize,
+    handle: &Handle,
+) {
+    let len = app.moods.moods.len();
+    if len == 0 {
+        return;
+    }
+    let next = if delta.is_negative() {
+        app.moods.cursor.saturating_sub(delta.unsigned_abs())
+    } else {
+        (app.moods.cursor + delta as usize).min(len.saturating_sub(1))
+    };
+    app.moods.cursor = next;
+    queue_mood_preview(tx, client, app, handle);
 }

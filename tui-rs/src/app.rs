@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::client::{Album, DaemonClient, LibraryEntry, QueueItem, SpeakerInfo, TrackInfo};
+use crate::client::{Album, DaemonClient, LibraryEntry, MoodListItem, MoodTrack, QueueItem, SpeakerInfo, TrackInfo};
 use ratatui::layout::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,6 +9,7 @@ pub enum Tab {
     Queue = 1,
     Library = 2,
     Albums = 3,
+    Moods = 4,
 }
 
 impl Tab {
@@ -18,16 +19,17 @@ impl Tab {
             1 => Tab::Queue,
             2 => Tab::Library,
             3 => Tab::Albums,
+            4 => Tab::Moods,
             _ => Tab::NowPlaying,
         }
     }
 
     pub fn next(self) -> Self {
-        Tab::from_index(((self as usize) + 1) % 4)
+        Tab::from_index(((self as usize) + 1) % 5)
     }
 
     pub fn prev(self) -> Self {
-        Tab::from_index(((self as usize) + 3) % 4)
+        Tab::from_index(((self as usize) + 4) % 5)
     }
 
     pub fn label(self) -> &'static str {
@@ -36,11 +38,12 @@ impl Tab {
             Tab::Queue => "Queue",
             Tab::Library => "Library",
             Tab::Albums => "Albums",
+            Tab::Moods => "Moods",
         }
     }
 }
 
-pub const ALL_TABS: [Tab; 4] = [Tab::NowPlaying, Tab::Queue, Tab::Library, Tab::Albums];
+pub const ALL_TABS: [Tab; 5] = [Tab::NowPlaying, Tab::Queue, Tab::Library, Tab::Albums, Tab::Moods];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -98,6 +101,9 @@ pub struct App {
 
     // Albums tab
     pub albums: AlbumState,
+
+    // Moods tab
+    pub moods: MoodState,
 }
 
 #[derive(Debug)]
@@ -144,6 +150,13 @@ pub struct AlbumState {
     pub search_results: Vec<Album>,
     pub scan_progress: f64,
     pub scan_status: String,
+}
+
+pub struct MoodState {
+    pub moods: Vec<MoodListItem>,
+    pub cursor: usize,
+    pub preview_tracks: Vec<MoodTrack>,
+    pub preview_name: String,
 }
 
 impl App {
@@ -204,6 +217,12 @@ impl App {
                 search_results: Vec::new(),
                 scan_progress: 0.0,
                 scan_status: String::new(),
+            },
+            moods: MoodState {
+                moods: Vec::new(),
+                cursor: 0,
+                preview_tracks: Vec::new(),
+                preview_name: String::new(),
             },
         }
     }

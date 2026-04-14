@@ -123,6 +123,46 @@ pub struct AlbumDetail {
     pub tracks: Vec<LibraryEntry>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MoodListItem {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub shuffle: bool,
+    #[serde(default)]
+    pub track_count: i32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MoodDetail {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub shuffle: bool,
+    #[serde(default)]
+    pub track_count: i32,
+    #[serde(default)]
+    pub tracks: Vec<MoodTrack>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MoodTrack {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub duration: i32,
+}
+
 #[derive(Debug, Deserialize)]
 struct LibraryResponse {
     #[serde(default)]
@@ -293,6 +333,37 @@ impl DaemonClient {
             .json()
             .await
             .context("parse /albums/{id}")
+    }
+
+    pub async fn moods(&self) -> Result<Vec<MoodListItem>> {
+        self.http
+            .get(format!("{}/moods", self.base))
+            .send()
+            .await
+            .context("GET /moods")?
+            .error_for_status()
+            .context("/moods returned error")?
+            .json()
+            .await
+            .context("parse /moods")
+    }
+
+    pub async fn mood_detail(&self, name: &str) -> Result<MoodDetail> {
+        self.http
+            .get(format!("{}/moods/{}", self.base, name))
+            .send()
+            .await
+            .context("GET /moods/{name}")?
+            .error_for_status()
+            .context("/moods/{name} returned error")?
+            .json()
+            .await
+            .context("parse /moods/{name}")
+    }
+
+    pub async fn play_mood(&self, name: &str) -> Result<()> {
+        self.post_empty(&format!("/moods/{}/play", name))
+            .await
     }
 
     pub async fn rescan(&self) -> Result<()> {
