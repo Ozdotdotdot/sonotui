@@ -334,6 +334,15 @@ func sonosSetVolume(ip string, vol int) error {
 	return err
 }
 
+func sonosGetMediaInfo(ip string) (string, error) {
+	raw, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "GetMediaInfo",
+		map[string]string{"InstanceID": "0"})
+	if err != nil {
+		return "", err
+	}
+	return parseSOAPField(raw, "CurrentURI"), nil
+}
+
 func sonosGetTransportInfo(ip string) (string, error) {
 	raw, err := soapCall(ip, avTransportPath, avTransportService, avTransportVersion, "GetTransportInfo",
 		map[string]string{"InstanceID": "0"})
@@ -1484,9 +1493,16 @@ func (sm *SonosManager) activeSpeakerIP() (string, string, error) {
 }
 
 func (sm *SonosManager) Play() error {
-	ip, _, err := sm.activeSpeakerIP()
+	ip, uuid, err := sm.activeSpeakerIP()
 	if err != nil {
 		return err
+	}
+	if currentURI, err := sonosGetMediaInfo(ip); err == nil {
+		if !strings.HasPrefix(currentURI, "x-rincon-queue:") {
+			if err := sonosQueue(ip, uuid); err != nil {
+				return err
+			}
+		}
 	}
 	return sonosPlay(ip)
 }
