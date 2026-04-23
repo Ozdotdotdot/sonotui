@@ -445,11 +445,12 @@ func (a *API) handleBatchQueue(w http.ResponseWriter, r *http.Request) {
 // ── Library ───────────────────────────────────────────────────────────────────
 
 func (a *API) handleLibraryRescan(w http.ResponseWriter, r *http.Request) {
-	if started := a.lib.Scan(a.events); !started {
+	full := r.URL.Query().Get("full") == "1"
+	if started := a.lib.Scan(a.events, full); !started {
 		writeJSON(w, map[string]any{"status": "already_scanning"})
 		return
 	}
-	writeJSON(w, map[string]any{"status": "started"})
+	writeJSON(w, map[string]any{"status": "started", "full": full})
 }
 
 func (a *API) handleLibraryRoot(w http.ResponseWriter, r *http.Request) {

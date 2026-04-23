@@ -332,7 +332,7 @@ func main() {
 	}
 
 	// Start library scan.
-	go lib.Scan(events)
+	go lib.Scan(events, false)
 
 	// ── Shutdown on signal ───────────────────────────────────────────────────
 

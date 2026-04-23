@@ -159,7 +159,7 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
         line("[/] volume down/up"),
         line("tab cycle speaker"),
         line("l switch to line-in"),
-        line(": commands  (rescan, reconnect, speaker)"),
+        line(": commands  (rescan, fullrescan, reconnect, speaker)"),
         line("? help"),
         line("q quit"),
         Line::from(""),
@@ -201,7 +201,8 @@ pub fn render_help_overlay(f: &mut Frame, area: Rect, app: &App) {
             lines.push(line("hovered album previews tracks"));
             lines.push(line("enter / a add previewed album to queue"));
             lines.push(line("/ search"));
-            lines.push(line(":rescan  rescan library"));
+            lines.push(line(":rescan  incremental rescan (fast)"));
+            lines.push(line(":fullrescan  force rebuild the entire index"));
         }
         Tab::Moods => {
             lines.push(Line::from(Span::styled("Moods", theme::title_style())));

@@ -1521,6 +1521,16 @@ fn exec_command(app: &mut App, cmd: &str, tx: &Sender<AppEvent>, client: &Daemon
                 }
             });
         }
+        "fullrescan" => {
+            app.set_status("Full rescan (rebuilding index)…");
+            spawn_task(handle, tx.clone(), {
+                let c = client.clone();
+                async move {
+                    c.full_rescan().await?;
+                    Ok(AppEvent::Status("Full rescan started".to_string()))
+                }
+            });
+        }
         "reconnect" => {
             app.set_status("Reconnecting…");
             spawn_task(handle, tx.clone(), {

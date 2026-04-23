@@ -30,6 +30,8 @@ type Track struct {
 	TrackNum    int    `json:"track_num"`
 	Duration    int    `json:"duration"` // seconds; 0 if unavailable
 	ArtHash     string `json:"art_hash"`
+	ModTimeUnix int64  `json:"mtime,omitempty"` // file mtime in unix nanos; used for incremental scan
+	Size        int64  `json:"size,omitempty"`  // file size in bytes; used for incremental scan
 }
 
 // Album is a group of tracks sharing album+albumartist.
@@ -311,8 +313,10 @@ type libraryCache struct {
 
 // Scan scans the music root, calling progressFn with (scanned, total).
 // Sends library_scan SSE events via the broadcaster.
+// When full is false, unchanged files (same mtime+size) are reused from cache,
+// skipping tag parsing and ffprobe. When true, every file is re-read.
 // Returns false without doing anything if a scan is already running.
-func (l *Library) Scan(events *Broadcaster) bool {
+func (l *Library) Scan(events *Broadcaster, full bool) bool {
 	l.mu.Lock()
 	if l.scanning {
 		l.mu.Unlock()
@@ -335,7 +339,6 @@ func (l *Library) Scan(events *Broadcaster) bool {
 		events.Send(evtLibraryScan("done", map[string]any{"track_count": len(cached.Tracks)}))
 	}
 
-	// Full scan in background.
 	go func() {
 		defer func() {
 			l.mu.Lock()
@@ -343,7 +346,23 @@ func (l *Library) Scan(events *Broadcaster) bool {
 			l.mu.Unlock()
 		}()
 
-		tracks, artMap, err := l.fullScan(events)
+		// Snapshot the current index for diffing. In full mode we start blank.
+		var prev map[string]Track
+		var prevArt map[string][]byte
+		if !full {
+			l.mu.RLock()
+			prev = make(map[string]Track, len(l.tracks))
+			for _, t := range l.tracks {
+				prev[t.Path] = t
+			}
+			prevArt = make(map[string][]byte, len(l.art))
+			for k, v := range l.art {
+				prevArt[k] = v
+			}
+			l.mu.RUnlock()
+		}
+
+		tracks, artMap, err := l.scanDiff(events, prev, prevArt)
 		if err != nil {
 			log.Printf("library scan error: %v", err)
 			events.Send(evtError(fmt.Sprintf("Library scan error: %v", err)))
@@ -364,7 +383,11 @@ func (l *Library) Scan(events *Broadcaster) bool {
 	return true
 }
 
-func (l *Library) fullScan(events *Broadcaster) ([]Track, map[string][]byte, error) {
+// scanDiff walks musicRoot and produces the new track list. When prev is
+// non-nil, files whose mtime+size match a cached Track are reused verbatim
+// (no tag parse, no ffprobe). The returned art map is pruned to only contain
+// hashes still referenced by the surviving track set.
+func (l *Library) scanDiff(events *Broadcaster, prev map[string]Track, prevArt map[string][]byte) ([]Track, map[string][]byte, error) {
 	var allPaths []string
 	err := filepath.WalkDir(l.musicRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -379,17 +402,44 @@ func (l *Library) fullScan(events *Broadcaster) ([]Track, map[string][]byte, err
 		return nil, nil, err
 	}
 
-	total := len(allPaths)
-	tracks := make([]Track, 0, total)
+	tracks := make([]Track, 0, len(allPaths))
 	artMap := make(map[string][]byte)
 
-	for i, absPath := range allPaths {
-		if i%100 == 0 && total > 0 {
-			progress := float64(i) / float64(total)
-			events.Send(evtLibraryScan("scanning", map[string]any{"progress": progress}))
+	parsed := 0
+	for _, absPath := range allPaths {
+		rel, relErr := filepath.Rel(l.musicRoot, absPath)
+		if relErr == nil {
+			rel = filepath.ToSlash(rel)
 		}
 
+		// Fast path: stat matches cached entry → reuse Track verbatim.
+		if prev != nil && rel != "" {
+			if cached, ok := prev[rel]; ok && cached.ModTimeUnix != 0 {
+				if st, statErr := os.Stat(absPath); statErr == nil {
+					if st.ModTime().UnixNano() == cached.ModTimeUnix && st.Size() == cached.Size {
+						if cached.ArtHash != "" {
+							if data, ok := prevArt[cached.ArtHash]; ok {
+								artMap[cached.ArtHash] = data
+							}
+						}
+						tracks = append(tracks, cached)
+						continue
+					}
+				}
+			}
+		}
+
+		// Progress is reported against files actually parsed, not walked.
+		if parsed%100 == 0 {
+			events.Send(evtLibraryScan("scanning", map[string]any{"parsed": parsed}))
+		}
+		parsed++
+
 		t, art := readTrack(l.musicRoot, absPath)
+		if st, statErr := os.Stat(absPath); statErr == nil {
+			t.ModTimeUnix = st.ModTime().UnixNano()
+			t.Size = st.Size()
+		}
 		if art != nil {
 			hash := artHash(art)
 			t.ArtHash = hash

@@ -370,6 +370,10 @@ impl DaemonClient {
         self.post_empty("/library/rescan").await
     }
 
+    pub async fn full_rescan(&self) -> Result<()> {
+        self.post_empty("/library/rescan?full=1").await
+    }
+
     pub async fn reconnect(&self) -> Result<()> {
         self.post_empty("/reconnect").await
     }
